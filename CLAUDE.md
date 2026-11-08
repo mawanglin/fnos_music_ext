@@ -8,6 +8,7 @@
 - `main` 只用来同步上游：`git fetch upstream && git checkout main && git merge --ff-only upstream/main`（或 reset 到 upstream/main），然后把 `native-only` rebase / merge 到最新 `main` 上。
 - **永远不要向上游（javycoder）提 PR。**
 - 版本号 = 上游基线 + 自有小版本：`VERSION=x.y.z-N`（N≥1）、`RELEASE_CHANNEL=fork`，对外 `x.y.z-nN`（tag `vx.y.z-nN`）。上游基线升级后 N 回到 1。改 VERSION 时同步改 `FNMUSIC_COMPAT.json` 的 `extension_version` 和 `CHANGELOG.md` 的 `## [x.y.z-nN]` 段。
+- **只要改了任何会进包的内容并重新构建，就必须递增小版本号 N**（`VERSION`、`FNMUSIC_COMPAT.json`、`CHANGELOG.md` 标题三处同步）。飞牛对相同版本号不会覆盖安装，同版本的新包装不上。试构建也算：给用户装过的包，改了就要升。
 - 发布：推 `native-only` 分支后，在其上打 tag `vx.y.z-nN` 并推送，触发 `.github/workflows/release.yml`（fork 版）。
 
 ## 与上游的差异面（rebase 时重点看）

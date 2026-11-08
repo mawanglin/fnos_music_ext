@@ -5,9 +5,9 @@
 
 ## [Unreleased]
 
-## [2.12.3-n1] - 2026-11-09
+## [2.12.3-n2] - 2026-11-09
 
-原生版（native-only fork）首个版本：同步上游 `v2.12.3` 基线（`javycoder/fnos_music_ext`），FPK 安装版本 `2.12.3-1`，tag / WebUI 显示 `v2.12.3-n1`，发布通道 `fork`。适配飞牛音乐 `1.0.10` 与 `1.1.19`。
+原生版（native-only fork）首个发布版本：同步上游 `v2.12.3` 基线（`javycoder/fnos_music_ext`），FPK 安装版本 `2.12.3-2`，tag / WebUI 显示 `v2.12.3-n2`，发布通道 `fork`。（`2.12.3-1` 为内部试构建版本，未发布；飞牛对相同版本号不会覆盖安装，故重新构建后递增。）适配飞牛音乐 `1.0.10` 与 `1.1.19`。
 
 ### 变更
 - **内置运行时，安装不碰系统**：fpk 自带 Python 3.13（python-build-standalone）、全部 Python 依赖（精确版本锁定）、Node 24（随 `nodejs-wheel-binaries`）与 ffmpeg/ffprobe 7.0.2 静态构建。NAS 上安装、升级、启动全程不联网、不执行 `apt-get` / `pip install`，不改动系统，避免影响后续系统升级。包内 `runtime/BUNDLED` 为标记；源码安装（无标记）仍按上游方式探测宿主机环境。
