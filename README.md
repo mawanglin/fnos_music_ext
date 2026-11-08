@@ -17,6 +17,8 @@
 
 > 面向 fnOS 官方音乐应用 `trim.music` 的社区扩展，非飞牛官方产品。保留官方客户端，通过可逆的代理接管增加能力；**不修改官方二进制或 nginx 配置，不直接写入官方数据库**。停止扩展即可恢复官方直连。
 
+> **原生版（native-only fork）**：本分支基于上游 [javycoder/fnos_music_ext](https://github.com/javycoder/fnos_music_ext) 同步而来，fpk **不再包含 Docker**，只保留飞牛原生部署（宿主机 systemd + supervisord，无需安装 Docker）。版本号 `x.y.z-nN` = 上游基线 `x.y.z` + 本分支小版本 `N`，安装包见本仓库 [Releases](https://github.com/mawanglin/fnos_music_ext/releases)。下文如仍提到 Docker 模式，在本分支中均不适用。
+
 ## 界面预览
 
 **在飞牛音乐里，继续用熟悉的方式听歌。**

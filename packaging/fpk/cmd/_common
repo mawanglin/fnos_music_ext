@@ -102,9 +102,15 @@ fnmusic_fail_from_log() {
 
 fnmusic_cleanup_sources_container() {
     # App Center rolls back TRIM_PKGVAR / target on install failure but does
-    # not remove the compose container; an empty-mount orphan then occupies
-    # the global name fnmusic-sources.
-    docker rm -f fnmusic-sources >/dev/null 2>&1 || true
+    # not stop the native sources unit; it would keep running against a
+    # rolled-back (rebuilt) repo dir and hold ports 8768-8774. Stop it so the
+    # next start/upgrade retry begins clean (unit file is kept; extend.sh
+    # restarts it). A leftover Docker container from a pre-native-only
+    # install is removed too when Docker happens to exist.
+    systemctl stop fnmusic-sources.service >/dev/null 2>&1 || true
+    if command -v docker >/dev/null 2>&1; then
+        docker rm -f fnmusic-sources >/dev/null 2>&1 || true
+    fi
 }
 
 fnmusic_env_source() {

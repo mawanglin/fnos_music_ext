@@ -1,7 +1,7 @@
 #!/bin/bash
 # App Center start/stop/status for fnmusic-ext.
-#   start  = bring the sources container up and enable the socket-takeover proxy
-#   stop   = stop the proxy (unit ExecStopPost restores the official socket) and the container
+#   start  = bring the native sources service up and enable the socket-takeover proxy
+#   stop   = stop the proxy (unit ExecStopPost restores the official socket) and the native sources service
 #   status = exit 0 running / exit 3 stopped
 set -uo pipefail
 
@@ -25,9 +25,8 @@ case "${1:-}" in
     stop)
         # Stopping the unit restores the official socket via ExecStopPost.
         systemctl stop "${UNIT}" >> "${FNMUSIC_LOG}" 2>&1 || true
-        if [ -n "${FNMUSIC_REPO_DIR}" ] && [ -f "${FNMUSIC_REPO_DIR}/docker-compose.yml" ]; then
-            docker compose -f "${FNMUSIC_REPO_DIR}/docker-compose.yml" stop >> "${FNMUSIC_LOG}" 2>&1 || true
-        fi
+        # Native sources (supervisord) unit: stop too so ports/memory are freed.
+        systemctl stop fnmusic-sources.service >> "${FNMUSIC_LOG}" 2>&1 || true
         exit 0
         ;;
     status)

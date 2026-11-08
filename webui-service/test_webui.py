@@ -2499,8 +2499,8 @@ def test_about_fields_and_disclaimer(about_env):
     assert rj["version"] == "v2.0.0"
     assert rj["author"] == "javycoder"
     assert rj["author_url"] == "https://github.com/javycoder"
-    assert rj["repo_url"] == "https://github.com/javycoder/fnos_music_ext"
-    assert rj["issues_url"] == "https://github.com/javycoder/fnos_music_ext/issues"
+    assert rj["repo_url"] == "https://github.com/mawanglin/fnos_music_ext"
+    assert rj["issues_url"] == "https://github.com/mawanglin/fnos_music_ext/issues"
     assert rj["donate"] is False  # 无 alipay.png 时不展示打赏
     assert rj["donate_alipay"] is False
     assert rj["donate_wechat"] is False
@@ -2913,58 +2913,45 @@ def test_update_check_github_first(env_file, update_cache_clean):
     assert paths == [webui.UPDATE_SOURCES[0]["api"]]
 
 
-def test_update_check_gitee_fallback_on_403(env_file, update_cache_clean):
+def test_update_check_only_uses_fork_github_source():
+    """native-only fork：只检查本 fork 的 GitHub Releases，不回退 Gitee/上游。"""
+    assert [src["name"] for src in webui.UPDATE_SOURCES] == ["github"]
+    assert "mawanglin/fnos_music_ext" in webui.UPDATE_SOURCES[0]["api"]
+    assert not any("javycoder" in src["api"] or "gitee" in src["api"] for src in webui.UPDATE_SOURCES)
+
+
+def test_update_check_github_failure_degrades(env_file, update_cache_clean):
     calls = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(str(request.url))
-        if "api.github.com" in str(request.url):
-            return httpx.Response(403, json={"message": "rate limit"})
-        return httpx.Response(200, json=GT_RELEASE)
-
-    with authed_client() as client:
-        _mock_http(handler)
-        rj = client.get("/api/update-check").json()
-    assert rj["source"] == "gitee"
-    assert rj["has_update"] is True
-    assert rj["latest"]["version"] == "2.9.0"
-    # gitee 响应无 html_url/published_at：按 tag 构造发行版页，时间取 created_at
-    assert rj["latest"]["html_url"] == "https://gitee.com/javycoder/fnos_music_ext/releases/tag/v2.9.0"
-    assert rj["latest"]["published_at"] == "2026-10-11T08:00:00+08:00"
-    assert calls == [webui.UPDATE_SOURCES[0]["api"], webui.UPDATE_SOURCES[1]["api"]]
-
-
-def test_update_check_gitee_fallback_on_network_error(env_file, update_cache_clean):
-    def handler(request: httpx.Request) -> httpx.Response:
-        if "api.github.com" in str(request.url):
-            raise httpx.ConnectError("connection reset")
-        return httpx.Response(200, json=GT_RELEASE)
-
-    with authed_client() as client:
-        _mock_http(handler)
-        rj = client.get("/api/update-check").json()
-    assert rj["source"] == "gitee"
-    assert rj["has_update"] is True
-
-
-def test_update_check_both_fail_degrades(env_file, update_cache_clean):
-    calls = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        calls.append(str(request.url))
-        raise httpx.ConnectError("timeout")
+        return httpx.Response(403, json={"message": "rate limit"})
 
     with authed_client() as client:
         _mock_http(handler)
         r = client.get("/api/update-check")
-    assert r.status_code == 200  # 双源皆败不报 500，前端静默降级
+    assert r.status_code == 200  # 失败不报 500，前端静默降级
     rj = r.json()
     assert rj["ok"] is True
     assert rj["has_update"] is False
-    assert "github" in rj["error"] and "gitee" in rj["error"]
+    assert "github" in rj["error"]
     # 失败负缓存生效：缓存期内重复请求不再出网
     client.get("/api/update-check")
-    assert len(calls) == 2
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("latest,current,newer", [
+    ("v2.12.3-n2", "v2.12.3-n1", True),
+    ("v2.12.3-n1", "v2.12.3-n1", False),
+    ("v2.12.3-n1", "v2.12.3-n2", False),
+    ("v2.12.4-n1", "v2.12.3-n9", True),
+    ("v2.12.3-n1", "v2.12.4-n1", False),
+    ("v2.12.3", "v2.12.3-n1", False),
+    ("v2.12.4", "v2.12.3-n1", True),
+    ("v2.12.3a", "v2.12.3-n1", False),
+])
+def test_version_newer_understands_fork_suffix(latest, current, newer):
+    assert webui._version_newer(latest, current) is newer
 
 
 def test_update_check_success_cached_no_refetch(env_file, update_cache_clean):

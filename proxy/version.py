@@ -16,7 +16,9 @@ FALLBACK_VERSION = "0.0.0"
 _BASE_PATTERN = r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
 _PACKAGE_VERSION = re.compile(rf"(?P<base>{_BASE_PATTERN})(?:-(?P<revision>0|[1-9][0-9]*))?")
 _LEGACY_VERSION = re.compile(rf"(?P<base>{_BASE_PATTERN})(?P<letter>[a-z])")
-RELEASE_CHANNELS = ("stable", "prerelease")
+# fork：native-only 分支专用通道。版本 x.y.z-N（N≥1）= 上游基线 x.y.z + 自有小版本 N，
+# 对外标识 x.y.z-nN（tag vx.y.z-nN），既同步上游基线又不与上游 tag 冲突。
+RELEASE_CHANNELS = ("stable", "prerelease", "fork")
 
 
 def release_info(version: str, *, channel: str | None = None,
@@ -29,7 +31,7 @@ def release_info(version: str, *, channel: str | None = None,
     if channel is not None and channel not in RELEASE_CHANNELS:
         raise ValueError(f"发布通道必须为 stable 或 prerelease，当前为 {channel!r}")
     if channel is None and not allow_legacy:
-        raise ValueError("必须通过 RELEASE_CHANNEL 显式指定发布通道 stable 或 prerelease")
+        raise ValueError("必须通过 RELEASE_CHANNEL 显式指定发布通道 stable、prerelease 或 fork")
     version = version.strip()
     match = _PACKAGE_VERSION.fullmatch(version)
     if match:
@@ -38,7 +40,11 @@ def release_info(version: str, *, channel: str | None = None,
             channel = "stable" if revision is None else "prerelease"
         if not allow_legacy and revision is None:
             raise ValueError("新发行安装版本必须保留数字修订号 x.y.z-N")
-        if channel == "prerelease":
+        if channel == "fork":
+            if revision is None or int(revision) < 1:
+                raise ValueError("fork 通道版本必须为 x.y.z-N 且 N≥1（N 即自有小版本号）")
+            display = f"{match['base']}-n{int(revision)}"
+        elif channel == "prerelease":
             if revision is None or int(revision) > 25:
                 raise ValueError("预发布修订号必须为 0–25（对应 a–z）")
             display = match["base"] + chr(ord("a") + int(revision))
@@ -77,7 +83,7 @@ def read_release_channel(path: Path, *, allow_legacy: bool = False) -> str | Non
             return None
         raise ValueError(f"缺少发布通道文件: {path}") from None
     if channel not in RELEASE_CHANNELS:
-        raise ValueError(f"{path} 必须仅包含 stable 或 prerelease")
+        raise ValueError(f"{path} 必须仅包含 stable、prerelease 或 fork")
     return channel
 
 

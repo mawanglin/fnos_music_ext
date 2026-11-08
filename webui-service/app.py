@@ -126,18 +126,13 @@ def _static_build_id() -> str:
 STATIC_BUILD_ID = _static_build_id()
 
 # ------------------------------------------------------------------ 检查更新 --
-# 双源顺序即回退顺序：优先 GitHub Releases，被墙/限流/超时等失败时回退 Gitee。
-# 命中哪个源，前端"升级"按钮就跳哪个源的 release 页。
+# native-only fork：只检查本 fork 的 GitHub Releases（不检查上游 javycoder，
+# 上游发布的是 Docker 版 fpk，不能直接升级到本分支）。
 UPDATE_SOURCES = (
     {
         "name": "github",
-        "api": "https://api.github.com/repos/javycoder/fnos_music_ext/releases/latest",
-        "page": "https://github.com/javycoder/fnos_music_ext/releases",
-    },
-    {
-        "name": "gitee",
-        "api": "https://gitee.com/api/v5/repos/javycoder/fnos_music_ext/releases/latest",
-        "page": "https://gitee.com/javycoder/fnos_music_ext/releases",
+        "api": "https://api.github.com/repos/mawanglin/fnos_music_ext/releases/latest",
+        "page": "https://github.com/mawanglin/fnos_music_ext/releases",
     },
 )
 # 成功缓存 6 小时（GitHub 匿名限额 60 次/小时），双源皆败负缓存 10 分钟——
@@ -1215,8 +1210,14 @@ def _version_newer(latest: str, current: str) -> bool:
     参与基础数字比较；同一基础版本的正式版也比预发布新。任一侧解析
     不出数字视为不更新。"""
     latest = (latest or "").strip().lstrip("vV")
-    if not re.fullmatch(r"\d+(?:\.\d+)*", latest):
+    # fork 版本形如 2.12.3-n1（上游基线 + 自有小版本号 n1）；纯数字视为小版本 0
+    fork_match = re.fullmatch(r"(\d+(?:\.\d+)*)(?:-n(\d+))?", latest)
+    if not fork_match:
         return False
+    lrev = int(fork_match.group(2) or 0)
+    crev_match = re.search(r"-n(\d+)\s*$", (current or "").strip())
+    crev = int(crev_match.group(1)) if crev_match else 0
+    latest = fork_match.group(1)
     lnums = _version_nums(latest)
     cnums = _version_nums(current)
     if not lnums or not cnums:
@@ -1224,6 +1225,8 @@ def _version_newer(latest: str, current: str) -> bool:
     size = max(len(lnums), len(cnums))
     lnums += [0] * (size - len(lnums))
     cnums += [0] * (size - len(cnums))
+    if lnums == cnums and lrev != crev:
+        return lrev > crev
     return lnums > cnums or (
         lnums == cnums
         and re.fullmatch(r"v?\d+\.\d+\.\d+(?:-[0-9]+|[a-z])", (current or "").strip()) is not None
@@ -2390,8 +2393,8 @@ async def api_maintenance_organize(job_id: str = "", request: Request = None):
 ABOUT = {
     "author": "javycoder",
     "author_url": "https://github.com/javycoder",
-    "repo_url": "https://github.com/javycoder/fnos_music_ext",
-    "issues_url": "https://github.com/javycoder/fnos_music_ext/issues",
+    "repo_url": "https://github.com/mawanglin/fnos_music_ext",
+    "issues_url": "https://github.com/mawanglin/fnos_music_ext/issues",
 }
 
 _MD_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")

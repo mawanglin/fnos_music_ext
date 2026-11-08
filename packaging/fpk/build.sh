@@ -98,7 +98,7 @@ rsync -a --delete \
     --exclude='.tasks_archive/' --exclude='.tools/' \
     --exclude='packaging/' --exclude='dist/' \
     --exclude='tests/' --exclude='docs/' --exclude='pytest.ini' \
-    --exclude='CONTRIBUTING.md' --exclude='AGENTS.md' \
+    --exclude='CONTRIBUTING.md' --exclude='AGENTS.md' --exclude='CLAUDE.md' \
     --exclude='test_*.py' --exclude='test_*.js' --exclude='conftest.py' --exclude='smoke_test.sh' --exclude='run_tests.py' \
     --exclude='.venv*/' --exclude='__pycache__/' --exclude='.pytest_cache/' \
     --exclude='*.pyc' --exclude='*.log' --exclude='*.logzip' --exclude='logs/' --exclude='/logs' \
@@ -110,6 +110,8 @@ rsync -a --delete \
     --exclude='llm_usage.json' --exclude='llm_usage.json.*' \
     --exclude='playlist_tracks/' --exclude='album_registry.json' --exclude='bind_registry.json' \
     --exclude='*.fpk' \
+    --exclude='/docker-compose.yml' --exclude='/.dockerignore' --exclude='/ensure_base_image.sh' \
+    --exclude='/container/Dockerfile' --exclude='/container/supervisord.conf' \
     "${REPO_ROOT}/" "${STAGE}/app/repo/"
 
 # 注入预编译包至打包 staging 目录，实现 fpk 离线内嵌而不污染源码树

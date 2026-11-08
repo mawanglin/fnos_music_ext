@@ -1,21 +1,22 @@
-name: Release
+name: Release (native-only fork)
 
+# 本 fork（native-only 分支）的发布流程：
+#   - 只发 GitHub Release（原生 fpk，无 Docker），不回填 moo 索引、不发 Gitee；
+#   - tag 形如 v<上游基线>-n<自有小版本>，如 v2.12.3-n1，由 VERSION(2.12.3-1) + RELEASE_CHANNEL(fork) 推导；
+#   - 不要求 tag 合入 main：本分支永不合并 main（保持 main 可持续同步上游）。
 on:
   push:
-    tags: ["v*"]
-  # 补发入口：tag 已存在但发行版发布失败时（如 gitee 链路抖动），由此入口用
-  # 当前分支上修复过的工作流对任意已有 tag 重跑（重跑原 run 仍用旧脚本）
+    tags: ["v*-n*"]
   workflow_dispatch:
     inputs:
       tag:
-        description: "要（补）发布的 tag，如 v2.7.0"
+        description: "要（补）发布的 tag，如 v2.12.3-n1"
         required: true
         type: string
 
 permissions:
   contents: write
 
-# 跨 tag / dispatch 串行发布，避免两个预发布同时清理后各自创建 Release。
 concurrency:
   group: release-${{ github.repository }}
   cancel-in-progress: false
@@ -23,13 +24,10 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
-    outputs:
-      formal: ${{ steps.release-kind.outputs.formal }}
     env:
-      # 打赏二维码文本（可选）：两个渠道独立生成，不把文本或图片提交到仓库
+      # 打赏二维码文本（可选，fork 未配置 Secret 时自动跳过）
       ALIPAY_QRCODE: ${{ secrets.ALIPAY_QRCODE }}
       WECHAT_QRCODE: ${{ secrets.WECHAT_QRCODE }}
-      # push 触发时为被推的 tag；dispatch 补发时为输入的 tag
       TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
@@ -42,11 +40,8 @@ jobs:
         run: |
           python3 proxy/version.py --tag "$TAG" --github-output "$GITHUB_OUTPUT"
 
-      - name: Verify stable release is merged into main
-        if: steps.release-kind.outputs.formal == 'true'
-        run: |
-          git fetch origin main
-          git merge-base --is-ancestor HEAD origin/main
+      - name: Require the fork release channel
+        run: test "$(cat RELEASE_CHANNEL)" = "fork"
 
       - name: Verify official music compatibility record
         run: python3 scripts/check_music_compat.py
@@ -96,6 +91,17 @@ jobs:
           fpk_file="$(ls dist/fnmusic-ext-*.fpk)"
           python3 scripts/check_donate_assets.py "$fpk_file"
 
+      - name: Verify the fpk contains no Docker files
+        run: |
+          fpk_file="$(ls dist/fnmusic-ext-*.fpk)"
+          rm -rf /tmp/fpk-inspect && mkdir -p /tmp/fpk-inspect/app
+          tar -xf "$fpk_file" -C /tmp/fpk-inspect
+          tar -xzf /tmp/fpk-inspect/app.tgz -C /tmp/fpk-inspect/app
+          test -f /tmp/fpk-inspect/app/repo/ensure_sources_native.sh
+          if find /tmp/fpk-inspect/app \( -name docker-compose.yml -o -name Dockerfile -o -name ensure_base_image.sh \) | grep -q .; then
+            echo "fpk 不应包含 Docker 文件" >&2; exit 1
+          fi
+
       - name: Extract changelog for this version
         run: |
           version="${{ steps.release-kind.outputs.display_version }}"
@@ -110,346 +116,20 @@ jobs:
           fi
           head -5 /tmp/release-notes.md
 
-      - name: Remove previous published prereleases
-        if: steps.release-kind.outputs.formal == 'false'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          export LC_ALL=C
-          # 仅允许 vX.Y.Z + 单个小写字母；目标 Release 在失败补发时也绝不删除。
-          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+[a-z]$ ]] || exit 1
-          releases="$(gh api --paginate --slurp "repos/${GH_REPO}/releases?per_page=100")"
-          candidates="$(jq -r --arg target "$TAG" '
-            .[][] | select(.prerelease == true and .draft == false)
-            | select(.tag_name != $target)
-            | select(.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+[a-z]$"))
-            | [.id, .tag_name] | @tsv
-          ' <<< "$releases")"
-          while IFS=$'\t' read -r release_id old_tag; do
-            [ -n "$release_id" ] || continue
-            # 删除前重新按 id 读取：身份或标记有变即中止，不碰正式版、draft。
-            current="$(gh api "repos/${GH_REPO}/releases/${release_id}")"
-            jq -e --arg id "$release_id" --arg tag "$old_tag" --arg target "$TAG" '
-              (.id | tostring) == $id and .tag_name == $tag and .tag_name != $target
-              and .prerelease == true and .draft == false
-              and (.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+[a-z]$"))
-            ' <<< "$current" >/dev/null
-            # 必须先删 Release 再删远端 tag；任何 API 失败均阻止创建新 Release。
-            gh api --method DELETE "repos/${GH_REPO}/releases/${release_id}"
-            gh api --method DELETE "repos/${GH_REPO}/git/refs/tags/${old_tag}"
-          done <<< "$candidates"
-          # 重新分页复核；非约定格式的预发布不自动删除，也不能与新版本并存。
-          remaining="$(gh api --paginate --slurp "repos/${GH_REPO}/releases?per_page=100")"
-          jq -e --arg target "$TAG" '
-            [.[][] | select(.prerelease == true and .draft == false and .tag_name != $target)]
-            | length == 0
-          ' <<< "$remaining" >/dev/null
-
       - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           fpk_file="$(ls dist/fnmusic-ext-*.fpk)"
           ver="${TAG#v}"
-          title="fnmusic-ext ${ver}"
-          # 字母后缀 = 自动迭代预发布：标记 Pre-release（/releases/latest 与应用内
-          # 检查更新都会跳过它，最新正式版不受影响），标题明示未经完整测试
-          pre_flags="--prerelease=false"
-          case "$ver" in
-            *[a-z])
-              pre_flags="--prerelease"
-              title="fnmusic-ext ${ver}（预发布，未经完整测试）"
-              ;;
-          esac
+          title="fnmusic-ext ${ver}（原生版）"
           if gh release view "${TAG}" >/dev/null 2>&1; then
-            gh release edit "${TAG}" --draft=false --title "$title" --notes-file /tmp/release-notes.md $pre_flags
+            gh release edit "${TAG}" --draft=false --title "$title" --notes-file /tmp/release-notes.md --prerelease=false --latest
             gh release upload "${TAG}" "$fpk_file" "$fpk_file.sha256" --clobber
           else
             gh release create "${TAG}" \
               --title "$title" \
               --notes-file /tmp/release-notes.md \
-              $pre_flags \
+              --latest \
               "$fpk_file" "$fpk_file.sha256"
           fi
-
-      # 后续 job（moo 索引、Gitee 镜像）需要同一份产物：重新打包会引入字节差异，
-      # 镜像与 GitHub 资产的 sha256 就不再一致。发行说明一并带上，避免各 job
-      # 重复截取 CHANGELOG 产生口径漂移。
-      - name: Stage release artifacts
-        run: cp /tmp/release-notes.md dist/release-notes.md
-
-      - name: Upload release artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-dist
-          path: dist/
-          retention-days: 1
-
-  # issue #36：moo 商店协议源索引自动回填。从 GitHub Release API 取真实资产
-  # （download_url/size/sha256 digest）与发行说明，生成/更新仓库根 moo.json 并
-  # 提交到 main；迭代预发布（2.9.0a 等字母尾巴）不改写索引——索引始终指向最新
-  # 正式版，与应用内"检查更新"口径一致。moo 商店按本文件溯源收录（issue #47）。
-  update-moo-index:
-    needs: release
-    # 字母尾巴预发布不更新 main 的稳定版索引；main 尚无 moo.json 时也不提交。
-    if: ${{ needs.release.outputs.formal == 'true' }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-
-      - name: Update moo.json from latest formal release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          # main 尚未合入本分支的脚本时（如预发布 tag 抢跑），安静跳过不强失败
-          if [ ! -f tools/update_moo_index.py ]; then
-            echo "main 上暂无 moo 索引脚本（未合入），跳过回填"
-            exit 0
-          fi
-          python3 tools/update_moo_index.py
-
-      - name: Commit index update
-        run: |
-          if [ ! -f moo.json ]; then
-            echo "main 上暂无 moo.json，跳过提交"
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add moo.json
-          if git diff --cached --quiet; then
-            echo "moo.json 无变化，跳过提交"
-            exit 0
-          fi
-          git commit -m "chore(ci): 自动更新 moo 商店协议源索引 [skip ci]"
-          git push
-
-  # Gitee 镜像只同步分支/标签/提交，发行版需经 API 发布；发布的是同一份
-  # fpk（字节一致，sha256 两边相同，取自 release job 的 artifact）。未配置
-  # GITEE_TOKEN 密钥时跳过。
-  #
-  # 严格排在 update-moo-index 之后：索引提交推到 main 后，Gitee 侧的仓库镜像
-  # 才会连带同步到最新 moo.json；若两者并行，Gitee 可能停在旧索引上，用户
-  # 看到的就是旧版本。moo 失败本身不阻断镜像，只决定先后顺序。
-  publish-gitee:
-    needs: [release, update-moo-index]
-    if: ${{ always() && needs.release.result == 'success' && needs.release.outputs.formal == 'true' }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    env:
-      GITEE_REPO: javycoder/fnos_music_ext
-      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-      TAG: ${{ inputs.tag || github.ref_name }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.TAG }}
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: release-dist
-          path: dist
-
-      # v2.7.0 实测：runner→gitee.com TLS 间歇失败（curl exit 35），故所有
-      # 小请求 API 调用必须带重试。
-      - name: Publish release to Gitee
-        if: env.GITEE_TOKEN != ''
-        # 整体上界：tag 轮询 ≤10min + 查询/创建（gcurl 最长 4×120s 各两次）+
-        # 文件级预算（fpk 1800s + sha256 600s）+ PATCH。没有它时单个请求的重试
-        # 会把 job 拖到一小时以上。
-        timeout-minutes: 90
-        run: |
-          set -euo pipefail
-          tag="${TAG}"
-          # 迭代预发布只在 GitHub 提供：Gitee 镜像面向稳定用户，不追尝鲜构建
-          case "${tag#v}" in
-            *[a-z])
-              echo "[gitee] 迭代预发布（${tag}）跳过 Gitee 镜像发布"
-              exit 0
-              ;;
-          esac
-          notes_file="dist/release-notes.md"
-          fpk_file="$(ls dist/fnmusic-ext-*.fpk)"
-          api="https://gitee.com/api/v5/repos/${GITEE_REPO}"
-
-          gcurl() {
-            # 仅用于小请求（查询/创建/PATCH）。大文件上传走 upload_attach，
-            # 因为 --retry 会整段重发请求体。
-            curl -sS --connect-timeout 15 --max-time 120 \
-              --retry 3 --retry-all-errors --retry-delay 4 "$@"
-          }
-
-          # 镜像同步有延迟，轮询等 tag 出现在 Gitee（公开仓库 ls-remote 无需认证）
-          synced=0
-          for _ in $(seq 1 20); do
-            if [ -n "$(git ls-remote "https://gitee.com/${GITEE_REPO}.git" "refs/tags/${tag}")" ]; then
-              synced=1
-              break
-            fi
-            sleep 30
-          done
-          if [ "${synced}" != 1 ]; then
-            echo "ERROR: Gitee 镜像 10 分钟内未同步到 tag ${tag}" >&2
-            exit 1
-          fi
-
-          # 查发行版是否已存在（重跑安全）：gitee 对不存在的发行版返回 200 + body
-          # 为 null 而非 404，必须按 body 里有无 id 判断，不能只看 HTTP 码
-          http="$(gcurl -o /tmp/gitee-release.json -w '%{http_code}' \
-            "${api}/releases/tags/${tag}?access_token=${GITEE_TOKEN}")"
-          release_id=""
-          if [ "${http}" = 200 ]; then
-            release_id="$(jq -r 'if .id then .id else "" end' /tmp/gitee-release.json)"
-          elif [ "${http}" != 404 ]; then
-            echo "ERROR: 查询 Gitee 发行版失败 HTTP ${http}" >&2
-            cat /tmp/gitee-release.json >&2 || true
-            exit 1
-          fi
-          ver="${tag#v}"
-          if [ -n "${release_id}" ]; then
-            # 重发时清理同名旧附件（不动 gitee 自动生成的源码包）；by-tag 响应的
-            # assets 不带附件 id，需走附件列表接口
-            gcurl -f -o /tmp/gitee-att-list.json \
-              "${api}/releases/${release_id}/attach_files?access_token=${GITEE_TOKEN}"
-            for attach_id in $(jq -r --arg fpk "$(basename "${fpk_file}")" --arg sum "$(basename "${fpk_file}").sha256" \
-                '.[]? | select(.name == $fpk or .name == $sum) | .id' /tmp/gitee-att-list.json); do
-              gcurl -o /dev/null -X DELETE \
-                "${api}/releases/${release_id}/attach_files/${attach_id}?access_token=${GITEE_TOKEN}" || true
-            done
-          else
-            # 创建：gitee 要求 target_commitish 必传（tag 已存在时仅作落点声明）
-            create_http="$(gcurl -o /tmp/gitee-create.json -w '%{http_code}' "${api}/releases" \
-              -d "access_token=${GITEE_TOKEN}" \
-              -d "tag_name=${tag}" \
-              -d "target_commitish=${tag}" \
-              -d "name=fnmusic-ext ${ver}" \
-              --data-urlencode "body@${notes_file}")"
-            if [ "${create_http}" != 201 ] && [ "${create_http}" != 200 ]; then
-              echo "ERROR: 创建 Gitee 发行版失败 HTTP ${create_http}" >&2
-              cat /tmp/gitee-create.json >&2 || true
-              exit 1
-            fi
-            release_id="$(jq -r '.id' /tmp/gitee-create.json)"
-          fi
-
-          # 上传 fpk + sha256，收集下载链接（实测返回单对象 browser_download_url，
-          # 保留数组/对象兼容解析以防变动）。
-          #
-          # 大文件上传不能用 gcurl 的 --retry：那会把 28MB 请求体整段重发，叠加
-          # --max-time 时最坏数倍于上限才以 curl exit 28 失败（v2.10.0 实测单个
-          # 文件烧掉 65 分钟）。这里改为文件级总预算 + 停滞即弃：
-          #
-          # v2.10.1（3×300s）与 v2.10.2（2×1200s）两次实测，fpk 全部在 --max-time
-          # 处耗尽——v2.10.2 从 12:31:02 到 13:11:32 整整 2400s 零产出，说明坏路径
-          # 上是"几乎不推进"而非"稍慢"。单纯放大时限只会把预算烧在同一根连接上，
-          # 因此改为：
-          #   - 文件级总预算（大文件 1800s / 小文件 600s），重试次数不再线性放大
-          #     耗时；
-          #   - 大文件低于 20KB/s（28MB 需 ~1400s，留出余量才能传完）持续 90s
-          #     就判这条连接不可用，立刻断开换新连接重试；只要还在推进就让
-          #     curl 传完；
-          #   - 每次失败先查附件列表，服务端已落盘就直接复用，绝不重传大文件。
-          upload_attach() {
-            local file="$1" name size budget stall deadline attempt=0 http url left
-            local -a throttle=()
-            name="$(basename "${file}")"
-            size="$(stat -c%s "${file}")"
-            budget=1800; stall=20480
-            if [ "${size}" -le 5242880 ]; then
-              budget=600; stall=0
-            fi
-            # 小文件不设速率闸（--speed-limit 0 的语义按 curl 版本而异，不依赖它）
-            if [ "${stall}" -gt 0 ]; then
-              throttle=(--speed-limit "${stall}" --speed-time 90)
-            fi
-            deadline=$(( $(date +%s) + budget ))
-            while :; do
-              attempt=$(( attempt + 1 ))
-              left=$(( deadline - $(date +%s) ))
-              [ "${left}" -ge 60 ] || break
-              # 单次上限压到剩余预算，绝不超出文件级上界
-              [ "${left}" -gt 1500 ] && left=1500
-              http="$(curl -sS --connect-timeout 20 --max-time "${left}" \
-                "${throttle[@]}" \
-                -o /tmp/gitee-att-one.json -w '%{http_code}' \
-                "${api}/releases/${release_id}/attach_files" \
-                -F "access_token=${GITEE_TOKEN}" \
-                -F "file=@${file}")" || http="000"
-              if [ "${http}" = 200 ] || [ "${http}" = 201 ]; then
-                url="$(jq -r 'if type == "array" then .[0].url else (.url // .browser_download_url) end' /tmp/gitee-att-one.json 2>/dev/null || true)"
-                if [ -n "${url}" ] && [ "${url}" != "null" ]; then
-                  printf '%s' "${url}"
-                  return 0
-                fi
-              fi
-              echo "[gitee] 第 ${attempt} 次上传 ${name} 未完成（HTTP ${http}，剩余 $(( deadline - $(date +%s) ))s）" >&2
-              # 响应丢失但附件其实已落盘时，直接复用，绝不重传大文件
-              url="$(curl -sS --connect-timeout 15 --max-time 60 \
-                "${api}/releases/${release_id}/attach_files?access_token=${GITEE_TOKEN}" \
-                | jq -r --arg n "${name}" '.[]? | select(.name == $n) | .url' 2>/dev/null | head -n1 || true)"
-              if [ -n "${url}" ] && [ "${url}" != "null" ]; then
-                echo "[gitee] ${name} 已在服务端，复用现有附件" >&2
-                printf '%s' "${url}"
-                return 0
-              fi
-              sleep $(( attempt < 5 ? attempt * 10 : 50 ))
-            done
-            return 1
-          }
-
-          # 镜像失败不拖垮发版：Gitee 是辅助渠道，GitHub Release 已发布且 moo 索引
-          # 已先行提交（本 job 排在它之后）；镜像不可用时把发行版说明的附件链接
-          # 回指 GitHub 资产（字节与 sha256 完全一致），并打 warning 让失败可见。
-          attach_links=""
-          mirrored=1
-          for f in "${fpk_file}" "${fpk_file}.sha256"; do
-            if url="$(upload_attach "${f}")"; then
-              attach_links="${attach_links}- [$(basename "${f}")](${url})"$'\n'
-            else
-              mirrored=0
-              name="$(basename "${f}")"
-              echo "::warning::Gitee 附件 ${name} 未能上传（镜像链路不可用），发行版说明改为回指 GitHub 资产"
-              attach_links="${attach_links}- [${name}](https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/${name})"$'\n'
-            fi
-          done
-
-          # 更新说明 = changelog + 附件下载链接；PATCH 必须重传 tag_name 与 name
-          {
-            cat "${notes_file}"
-            echo
-            if [ "${mirrored}" != 1 ]; then
-              echo "> **附件说明**：本次 Gitee 镜像的安装包上传失败（镜像链路不可用），"
-              echo "> 上方链接指向 GitHub 发行版；文件与镜像本应发布的字节一致（sha256 相同）。"
-              echo
-            fi
-            echo "### 附件"
-            printf '%s' "${attach_links}"
-          } > /tmp/gitee-body.md
-          patch_http="$(gcurl -o /tmp/gitee-patch.json -w '%{http_code}' -X PATCH \
-            "${api}/releases/${release_id}?access_token=${GITEE_TOKEN}" \
-            -d "tag_name=${tag}" \
-            -d "name=fnmusic-ext ${ver}" \
-            --data-urlencode "body@/tmp/gitee-body.md")"
-          if [ "${patch_http}" != 200 ]; then
-            echo "ERROR: 更新 Gitee 发行版说明失败 HTTP ${patch_http}" >&2
-            cat /tmp/gitee-patch.json >&2 || true
-            exit 1
-          fi
-          if [ "${mirrored}" != 1 ]; then
-            {
-              echo "### Gitee 镜像降级"
-              echo
-              echo "安装包未上传成功，发行版说明已回指 GitHub 资产。"
-              echo "镜像链路恢复后可用 workflow_dispatch 对 ${tag} 重跑本工作流补齐。"
-            } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
-            echo "[gitee] 发行版与说明已更新，但安装包未镜像（见 warning）"
-            exit 0
-          fi
-          echo "[gitee] 发行版发布完成: https://gitee.com/${GITEE_REPO}/releases"

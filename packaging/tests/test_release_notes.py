@@ -137,8 +137,6 @@ def test_formal_2110_documents_cumulative_changes_since_2100():
 
 
 RELEASE_WORKFLOW = ROOT / '.github/workflows/release.yml'
-CLEANUP_STEP = 'Remove previous published prereleases'
-PUBLISH_STEP = 'Create or update GitHub Release'
 
 
 @pytest.mark.parametrize("version,channel,tag,formal,success", [
@@ -192,321 +190,45 @@ def _release_step(name):
                      if line.startswith('          ') or not line.strip())
 
 
-def _release(tag, release_id=1, prerelease=True, draft=False):
-    return dict(id=release_id, tag_name=tag, prerelease=prerelease, draft=draft)
+def test_fork_release_workflow_contract():
+    """native-only fork：只发 GitHub Release，不回填 moo、不发 Gitee、不要求合入 main。"""
+    import yaml
+    text = RELEASE_WORKFLOW.read_text()
+    workflow = yaml.safe_load(text)
+    assert set(workflow["jobs"]) == {"release"}
+    assert workflow[True]["push"]["tags"] == ["v*-n*"]  # PyYAML 把 on 解析成 True
+    assert "origin/main" not in text, "fork 发布不得要求 tag 合入 main"
+    assert "gitee.com" not in text and "update_moo_index" not in text
+    assert "Remove previous published prereleases" not in text
+    assert "--latest" in text and "--prerelease=false" in text
 
 
-def _run_release_sandbox(tmp_path, releases, *, tag='v2.10.0b', fail='', current=None,
-                         appeared=None):
-    if not shutil.which('jq'):
-        pytest.skip('release shell sandbox requires jq')
-    state = tmp_path / 'state.json'
-    state.write_text(json.dumps(dict(releases=releases, fail=fail, current=current,
-                                    appeared=appeared, lists=0, calls=[])))
-    gh = tmp_path / 'gh'
-    # Only this executable handles gh; unexpected commands fail closed, no network.
-    gh.write_text(f'#!{sys.executable}\n' + textwrap.dedent('''\
-        import json
-        import os
-        import sys
-        from pathlib import Path
-
-        path = Path(os.environ['MOCK_STATE'])
-        state = json.loads(path.read_text())
-        args = sys.argv[1:]
-        state['calls'].append(args)
-
-        def finish(value=None, code=0):
-            path.write_text(json.dumps(state))
-            if value is not None:
-                print(json.dumps(value))
-            sys.exit(code)
-
-        if args[0] == 'api':
-            endpoint = args[-1]
-            operation = 'DELETE:' if args[:3] == ['api', '--method', 'DELETE'] else ''
-            if operation + endpoint == state['fail']:
-                finish(code=1)
-            root = 'repos/example/music/'
-            if args == ['api', '--paginate', '--slurp', root + 'releases?per_page=100']:
-                state['lists'] += 1
-                if state['fail'] == 'final-list' and state['lists'] == 2:
-                    finish(code=1)
-                if state['lists'] == 2 and state['appeared']:
-                    state['releases'].append(state['appeared'])
-                # One item per page exercises the real script's slurped-page parsing.
-                finish([[r] for r in state['releases']])
-            if args[:3] == ['api', '--method', 'DELETE']:
-                if endpoint.startswith(root + 'releases/'):
-                    rid = int(endpoint.rsplit('/', 1)[1])
-                    assert any(r['id'] == rid for r in state['releases'])
-                    state['releases'] = [r for r in state['releases'] if r['id'] != rid]
-                    finish()
-                if endpoint.startswith(root + 'git/refs/tags/'):
-                    finish()
-            if args[:1] == ['api'] and len(args) == 2 and endpoint.startswith(root + 'releases/'):
-                rid = int(endpoint.rsplit('/', 1)[1])
-                release = next(r for r in state['releases'] if r['id'] == rid)
-                finish(state['current'] if state['current'] is not None else release)
-        if args[:2] == ['release', 'view']:
-            finish(code=0 if any(r['tag_name'] == args[2] for r in state['releases']) else 1)
-        if args[:2] in (['release', 'create'], ['release', 'edit'], ['release', 'upload']):
-            finish()
-        finish(code=99)
-    '''))
-    gh.chmod(0o755)
-    dist = tmp_path / 'dist'
-    dist.mkdir()
-    (dist / 'fnmusic-ext-2.10.0b.fpk').touch()
-    (dist / 'fnmusic-ext-2.10.0b.fpk.sha256').touch()
-    # Run both actual workflow scripts in one fail-fast shell, as Actions does.
-    script = _release_step(CLEANUP_STEP) + '\n' + _release_step(PUBLISH_STEP)
-    env = dict(os.environ, PATH=f'{tmp_path}:{os.environ["PATH"]}', TAG=tag,
-               GH_TOKEN='offline-placeholder', GH_REPO='example/music', MOCK_STATE=str(state))
-    result = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', script], cwd=tmp_path,
-                            env=env, capture_output=True, text=True, timeout=10)
-    return result, json.loads(state.read_text())['calls']
-
-
-def _deletions(calls):
-    return [c[-1] for c in calls if c[:3] == ['api', '--method', 'DELETE']]
-
-
-def _published(calls):
-    return [c for c in calls if c[:2] in (['release', 'create'], ['release', 'edit'])]
-
-
-def test_release_cleanup_workflow_contract():
-    workflow = RELEASE_WORKFLOW.read_text()
-    names = ['Run packaging tests', 'Build fpk package', 'Extract changelog for this version',
-             CLEANUP_STEP, PUBLISH_STEP]
-    assert [workflow.index(f'- name: {n}') for n in names] == sorted(
-        workflow.index(f'- name: {n}') for n in names)
-    assert 'group: release-${{ github.repository }}\n  cancel-in-progress: false' in workflow
-    cleanup = workflow.split(f'- name: {CLEANUP_STEP}\n', 1)[1].split('        run:', 1)[0]
-    assert "if: steps.release-kind.outputs.formal == 'false'" in cleanup
-    assert 'GH_TOKEN: ${{ github.token }}' in cleanup
-    assert 'GH_REPO: ${{ github.repository }}' in cleanup
-    assert 'contents: write' in workflow
-    for name in (CLEANUP_STEP, PUBLISH_STEP):
-        subprocess.run(['bash', '-n'], input=_release_step(name), text=True, check=True)
-
-
-def test_release_cleanup_deletes_release_then_tag_before_publish(tmp_path):
-    # Includes a second page and an old version outside the target's minor series.
-    result, calls = _run_release_sandbox(tmp_path, [
-        _release('v2.10.0a', 1), _release('v2.9.0a', 2)])
-    assert result.returncode == 0, result.stderr
-    assert _deletions(calls) == [
-        'repos/example/music/releases/1', 'repos/example/music/git/refs/tags/v2.10.0a',
-        'repos/example/music/releases/2', 'repos/example/music/git/refs/tags/v2.9.0a']
-    last_delete = max(i for i, c in enumerate(calls) if c[:3] == ['api', '--method', 'DELETE'])
-    assert last_delete < calls.index(_published(calls)[0])
-    assert sum('--paginate' in c for c in calls) == 2
-
-
-def test_release_cleanup_protects_formal_draft_and_retry_target(tmp_path):
-    result, calls = _run_release_sandbox(tmp_path, [
-        _release('v2.9.0', 1, prerelease=False),
-        _release('v2.10.0a', 2, prerelease=False),
-        _release('v2.8.0a', 3, draft=True),
-        _release('v2.10.0b', 4), _release('v2.7.0a', 5)])
-    assert result.returncode == 0, result.stderr
-    assert _deletions(calls) == [
-        'repos/example/music/releases/5', 'repos/example/music/git/refs/tags/v2.7.0a']
-    assert _published(calls)[0][:3] == ['release', 'edit', 'v2.10.0b']
-
-
-@pytest.mark.parametrize('draft', [False, True])
-def test_release_cleanup_never_deletes_existing_target(tmp_path, draft):
-    result, calls = _run_release_sandbox(tmp_path, [_release('v2.10.0b', draft=draft)])
-    assert result.returncode == 0, result.stderr
-    assert _deletions(calls) == []
-    assert _published(calls)[0][:3] == ['release', 'edit', 'v2.10.0b']
-
-
-@pytest.mark.parametrize('tag', ['v2.10.0', '2.10.0a', 'v2.10.0aa', 'v2.10.0A',
-                                  'v2.10.0-rc1', 'v2x10x0a'])
-def test_release_cleanup_rejects_invalid_target_before_api(tmp_path, tag):
-    result, calls = _run_release_sandbox(tmp_path, [_release('v2.10.0a')], tag=tag)
-    assert result.returncode != 0
-    assert calls == []
-
-
-@pytest.mark.parametrize('tag', ['v2.9.0', '2.10.0a', 'v2.10.0aa', 'v2.10.0A',
-                                  'v2.10.0-rc1', 'v2x10x0a'])
-def test_release_cleanup_blocks_unrecognized_prerelease_without_deleting(tmp_path, tag):
-    result, calls = _run_release_sandbox(tmp_path, [_release(tag)])
-    assert result.returncode != 0
-    assert _deletions(calls) == []
-    assert _published(calls) == []
-
-
-@pytest.mark.parametrize('fail,attempted', [
-    ('repos/example/music/releases?per_page=100', []),
-    ('repos/example/music/releases/1', []),
-    ('DELETE:repos/example/music/releases/1', ['releases/1']),
-    ('DELETE:repos/example/music/git/refs/tags/v2.10.0a',
-     ['releases/1', 'git/refs/tags/v2.10.0a']),
-    ('final-list', ['releases/1', 'git/refs/tags/v2.10.0a']),
+@pytest.mark.parametrize("version,tag,success", [
+    ("2.12.3-1", "v2.12.3-n1", True),
+    ("2.12.3-12", "v2.12.3-n12", True),
+    ("2.12.3-0", "v2.12.3-n0", False),   # fork 小版本号必须 ≥1
+    ("2.12.3-1", "v2.12.3", False),       # 不得与上游 tag 同名
+    ("2.12.3-1", "v2.12.3-n2", False),
+    ("2.12.3", "v2.12.3-n1", False),
 ])
-def test_release_cleanup_api_failure_stops_publication(tmp_path, fail, attempted):
-    result, calls = _run_release_sandbox(tmp_path, [_release('v2.10.0a')], fail=fail)
-    assert result.returncode != 0
-    # Includes the failed DELETE; no later deletion or publication may be attempted.
-    assert _deletions(calls) == ['repos/example/music/' + x for x in attempted]
-    assert all(c[0] == 'api' for c in calls)
-    assert _published(calls) == []
-    assert not any(c[:2] == ['release', 'upload'] for c in calls)
-
-
-@pytest.mark.parametrize('changed', [
-    _release('v2.10.0a', prerelease=False),
-    _release('v2.10.0a', draft=True),
-    _release('v2.10.0b'), _release('v2.10.0'), _release('v2.10.0a', 999),
-])
-def test_release_cleanup_rechecks_identity_before_deletion(tmp_path, changed):
-    result, calls = _run_release_sandbox(tmp_path, [_release('v2.10.0a')], current=changed)
-    assert result.returncode != 0
-    assert _deletions(calls) == []
-    assert _published(calls) == []
-
-
-def test_release_cleanup_final_recheck_blocks_newly_appeared_prerelease(tmp_path):
-    result, calls = _run_release_sandbox(tmp_path, [], appeared=_release('v2.10.0c'))
-    assert result.returncode != 0
-    assert _deletions(calls) == []
-    assert _published(calls) == []
-
-
-def test_release_cleanup_no_previous_release(tmp_path):
-    result, calls = _run_release_sandbox(tmp_path, [])
-    assert result.returncode == 0, result.stderr
-    assert _deletions(calls) == []
-    assert _published(calls)[0][:3] == ['release', 'create', 'v2.10.0b']
-
-
-# === Gitee 发行版发布：大文件上传不得整段重发 ===
-
-GITEE_STEP = 'Publish release to Gitee'
-
-
-def _gitee_step_script():
-    """取出 Gitee 步骤的 run 脚本（含函数定义），供 bash 语法与内容断言。"""
-    workflow = RELEASE_WORKFLOW.read_text()
-    block = workflow.split(f'      - name: {GITEE_STEP}\n', 1)[1]
-    block = block.split('\n      - name:', 1)[0]
-    return block.split('        run: |\n', 1)[1]
-
-
-def _unindent_run(script):
-    return '\n'.join(line[10:] if line.startswith(' ' * 10) else line
-                     for line in script.splitlines())
-
-
-def _upload_function_body(script):
-    """upload_attach 的函数体（到独占一行的右花括号为止）。"""
-    return script.split('upload_attach() {', 1)[1].split('\n}\n', 1)[0]
-
-
-def test_gitee_step_script_is_valid_bash():
-    script = _unindent_run(_gitee_step_script())
-    path = Path('/tmp/gitee-step.sh')
-    path.write_text(script)
-    subprocess.run(['bash', '-n', str(path)], check=True)
-
-
-def test_gitee_existing_asset_cleanup_uses_install_revision(tmp_path):
-    """补发只能选择真实 -N 安装包附件，不能从展示 tag 拼裸版本名。"""
-    if not shutil.which('jq'):
-        pytest.skip('release shell sandbox requires jq')
-    assets = tmp_path / 'assets.json'
-    assets.write_text(json.dumps([
-        {'id': 11, 'name': 'fnmusic-ext-2.11.0-4.fpk'},
-        {'id': 12, 'name': 'fnmusic-ext-2.11.0-4.fpk.sha256'},
-        {'id': 21, 'name': 'fnmusic-ext-2.11.0.fpk'},
-        {'id': 22, 'name': 'fnmusic-ext-2.10.2.fpk'},
-        {'id': 23, 'name': 'Source code.zip'},
-    ]))
-    script = _unindent_run(_gitee_step_script())
-    selector = script.split('for attach_id in $(', 1)[1].split('); do', 1)[0]
-    selector = selector.replace('/tmp/gitee-att-list.json', f'"{assets}"')
+def test_fork_channel_version_and_tag(tmp_path, version, tag, success):
+    (tmp_path / "proxy").mkdir()
+    shutil.copyfile(ROOT / "proxy/version.py", tmp_path / "proxy/version.py")
+    (tmp_path / "VERSION").write_text(version)
+    (tmp_path / "RELEASE_CHANNEL").write_text("fork")
     result = subprocess.run(
-        ['bash', '-e', '-o', 'pipefail', '-c', selector],
-        env=dict(os.environ, fpk_file='dist/fnmusic-ext-2.11.0-4.fpk', ver='2.11.0'),
-        capture_output=True, text=True, check=True)
-    assert result.stdout.splitlines() == ['11', '12']
+        [sys.executable, str(tmp_path / "proxy/version.py"), "--tag", tag, "--format", "ui_version"],
+        cwd=tmp_path, capture_output=True, text=True, timeout=10,
+    )
+    assert (result.returncode == 0) is success, result.stdout + result.stderr
+    if success:
+        assert result.stdout.strip() == tag
 
 
-def test_stable_release_requires_main_ancestry_and_explicit_formal_flag():
-    workflow = (ROOT / '.github/workflows/release.yml').read_text()
-    guard = workflow.split('- name: Verify stable release is merged into main', 1)[1]
-    guard = guard.split('- name:', 1)[0]
-    assert "if: steps.release-kind.outputs.formal == 'true'" in guard
-    assert 'git fetch origin main' in guard
-    assert 'git merge-base --is-ancestor HEAD origin/main' in guard
-    assert 'pre_flags="--prerelease=false"' in workflow
-
-
-def test_gitee_large_upload_never_uses_body_replaying_retry():
-    """v2.10.0 事故根因：gcurl --retry 会把 28MB 请求体整段重发。
-
-    curl 的 --retry 在 --max-time 600 下最坏 6×600s 才以 exit 28 失败，
-    实测单个附件烧掉 65 分钟。上传必须走独立函数，且不得复用带 --retry 的封装。
-    """
-    script = _unindent_run(_gitee_step_script())
-    assert 'upload_attach()' in script
-    upload_body = _upload_function_body(script)
-    assert 'gcurl' not in upload_body, '附件上传不得复用带 --retry 的 gcurl'
-    assert '--retry' not in upload_body
-    # 每次尝试自身仍要有明确上界
-    assert '--max-time' in upload_body
-    # 上传调用点必须走 upload_attach，而不是直接 curl -F
-    assert 'upload_attach "${f}"' in script
-    assert 'attach_files"' in script
-
-
-def test_gitee_step_has_bounded_wall_clock_and_idempotent_recovery():
-    """重试必须能识别"服务端已落盘但响应丢失"，避免重复传输大文件。
-
-    时限按体积分级并设文件级总预算（v2.10.1 实测：28MB fpk 在 3×300s 下全部
-    必然超时；v2.10.2 实测：2×1200s 同样 2400s 零产出）。因此改为文件级
-    总预算 + 停滞检测：大文件 1800s / 小文件 600s，且大文件只要 90s 内低于
-    20KB/s 就断开换连接，不再靠放大单次时限硬扛。
-    """
-    script = _unindent_run(_gitee_step_script())
-    assert 'timeout-minutes:' in RELEASE_WORKFLOW.read_text()
-    upload_body = _upload_function_body(script)
-    # 失败后先查附件列表再决定是否重试（幂等复用）
-    assert 'attach_files?access_token=' in upload_body
-    assert '复用现有附件' in upload_body
-    # 文件级总预算按体积分级
-    assert 'budget=1800; stall=20480' in upload_body
-    assert 'budget=600; stall=0' in upload_body
-    # 总预算必须在循环里被真正约束（剩余预算为底部退出条件）
-    assert 'deadline=$(( $(date +%s) + budget ))' in upload_body
-    assert '[ "${left}" -ge 60 ] || break' in upload_body
-    # 停滞连接必须被主动切断，而不是等满单次上限；小文件不传 0 值给 curl
-    assert 'throttle=(--speed-limit "${stall}" --speed-time 90)' in upload_body
-    assert '"${throttle[@]}"' in upload_body
-
-
-def test_gitee_publish_runs_after_moo_index_and_never_blocks_release():
-    """moo 索引必须早于 Gitee 镜像同步。
-
-    Gitee 仓库镜像按 main 的分支状态同步，索引提交推到 main 之后镜像才会带上
-    新 moo.json；两者并行时 Gitee 可能停在旧索引上。同时镜像失败不得连累
-    moo 回填（v2.10.2 实测：Gitee 附件上传失败让 release job 变红，
-    update-moo-index 被整体跳过，索引停在 2.10.1）。
-    """
-    workflow = RELEASE_WORKFLOW.read_text()
-    assert '  publish-gitee:\n' in workflow
-    assert 'needs: [release, update-moo-index]' in workflow
-    # 独立 job 后仍需容忍 moo 失败，只在 release 成功时发布镜像
-    assert "always() && needs.release.result == 'success'" in workflow
-    # fpk 由 artifact 传递，避免两个 job 各自重打包导致 sha256 不一致
-    assert 'actions/upload-artifact@v4' in workflow
-    assert 'actions/download-artifact@v4' in workflow
-    # 上传失败降级为 warning，不整 job 失败
-    assert 'mirrored=1' in workflow
-    assert '::warning::Gitee 附件' in workflow
+def test_repository_is_on_fork_channel_with_matching_tag():
+    version = (ROOT / "VERSION").read_text().strip()
+    assert (ROOT / "RELEASE_CHANNEL").read_text().strip() == "fork"
+    base, _, revision = version.partition("-")
+    assert int(revision) >= 1
+    notes = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert f"## [{base}-n{int(revision)}]" in notes

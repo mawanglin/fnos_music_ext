@@ -277,20 +277,11 @@ def test_real_coverage_union_contains_both_suite_branches(tmp_path, monkeypatch)
     assert {1, 2, 3, 4} <= set(data.lines(str(module)))
 
 
-def test_ci_uses_runner_and_retains_unique_image_checks():
+def test_ci_uses_runner_and_has_no_docker_image_jobs():
     ci = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
     jobs = ci["jobs"]
     commands = [step.get("run", "") for step in jobs["test"]["steps"]]
     assert "python scripts/run_tests.py --jobs 2 --coverage" in commands
     assert not any("python -m pytest" in command for command in commands)
-    assert "images" not in jobs
-    images = jobs["images-multiarch"]
-    build = next(step for step in images["steps"] if step.get("uses", "").startswith("docker/build-push-action@"))
-    assert build["with"]["file"] == "container/Dockerfile"
-    assert {row["platform"] for row in images["strategy"]["matrix"]["include"]} == {
-        "linux/amd64", "linux/arm64",
-    }
-    steps = {step.get("name"): step for step in images["steps"]}
-    assert steps["Verify on-demand musicdl healthz"]["if"] == "matrix.arch == 'x64'"
-    assert "--require-non-root" in steps["Verify non-root contract for each bundled service"]["run"]
-    assert "sleep 120" in steps["Smoke lxmusic chain on ${{ matrix.platform }}"]["run"]
+    # native-only fork：不构建、不冒烟任何 Docker 镜像
+    assert "images" not in jobs and "images-multiarch" not in jobs

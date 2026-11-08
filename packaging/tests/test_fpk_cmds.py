@@ -291,15 +291,6 @@ def held_socket(tmp_path):
         s.close()
 
 
-def test_install_init_fails_without_docker(sb, tmp_path):
-    _socket_variant(sb, tmp_path / "absent.sock")
-    result = sb.run("install_init")
-    assert result.returncode == 1
-    assert "Docker" in result.stderr
-    # 失败原因必须写入 TRIM_TEMP_LOGFILE（应用中心进度 UI 展示）
-    assert "Docker" in (tmp_path / "trim-log.txt").read_text(encoding="utf-8")
-
-
 def test_install_init_fails_without_official_socket(sb, tmp_path):
     sb.add_docker()
     _socket_variant(sb, tmp_path / "absent.sock")
@@ -308,19 +299,12 @@ def test_install_init_fails_without_official_socket(sb, tmp_path):
     assert "飞牛音乐" in result.stderr
 
 
-def test_install_init_passes_with_both_prerequisites(sb, tmp_path, held_socket):
-    sb.add_docker()
+def test_install_init_passes_without_docker(sb, tmp_path, held_socket):
+    """native-only：不再要求 Docker，只要官方飞牛音乐 socket 在即可。"""
     _socket_variant(sb, held_socket)
     result = sb.run("install_init")
     assert result.returncode == 0, result.stderr
-
-
-def test_install_init_fails_when_docker_daemon_not_running(sb, tmp_path, held_socket):
-    sb.add_docker(rc=1)
-    _socket_variant(sb, held_socket)
-    result = sb.run("install_init")
-    assert result.returncode == 1
-    assert "Docker 服务未运行" in result.stderr
+    assert not sb.docker_log.exists()
 
 
 # -------------------------------------------------------- install_callback ---
@@ -705,6 +689,7 @@ def test_upgrade_callback_install_failure_keeps_backup(sb):
     repo = sb.make_repo(env_text="FNMUSIC_MUSICDL_ENABLED=true\n")
     sb.add_data(repo)
     sb.add_docker()
+    sb.add_systemctl()
     _make_backup(sb, repo, "FNMUSIC_MUSICDL_ENABLED=true\n")
     result = sb.run("upgrade_callback", STUB_INSTALL_RC="9")
     assert result.returncode == 1
@@ -713,6 +698,8 @@ def test_upgrade_callback_install_failure_keeps_backup(sb):
     # 失败后清理音源容器：回滚会原地重建 repo 目录（inode 更换），运行中容器
     # 绑旧 inode 变空挂载僵尸（占端口/容器名、healthcheck 永久失败），必须移除
     assert "rm -f fnmusic-sources" in sb.docker_log.read_text(encoding="utf-8")
+    # native-only：同时停掉原生音源 unit，避免它对着被回滚重建的 repo 继续占端口
+    assert "stop fnmusic-sources.service" in sb.ctl_log.read_text(encoding="utf-8")
 
 
 def test_upgrade_callback_defaults_to_musicdl_when_env_silent(sb):
@@ -744,6 +731,7 @@ def test_uninstall_init_degrades_when_restore_fails(sb):
     assert "stop fnmusic-ext.service" in ctl
     assert "daemon-reload" in ctl
     assert not unit.exists()
+    assert "disable --now fnmusic-sources.service" in ctl
     assert "rm -f fnmusic-sources" in sb.docker_log.read_text(encoding="utf-8")
     # 数据归档没有被还原失败阻断
     assert "czf" in sb.tar_log.read_text(encoding="utf-8")
@@ -907,11 +895,22 @@ def test_main_start_failure_surfaces_log_tail(sb):
 
 
 def test_main_stop_is_idempotent_even_when_all_fail(sb):
-    sb.make_repo(with_compose=True)
+    sb.make_repo()
     _write_stub(sb.bindir, "systemctl", "#!/bin/bash\nexit 1\n")
-    _write_stub(sb.bindir, "docker", "#!/bin/bash\nexit 1\n")
     result = sb.run("main", "stop")
     assert result.returncode == 0, result.stderr
+
+
+def test_main_stop_stops_proxy_and_native_sources_without_docker(sb):
+    """native-only：停止 = 停代理（还原官方直连）+ 停原生音源 unit，不碰 docker。"""
+    sb.make_repo()
+    sb.add_systemctl()
+    result = sb.run("main", "stop")
+    assert result.returncode == 0, result.stderr
+    ctl = sb.ctl_log.read_text(encoding="utf-8")
+    assert "stop fnmusic-ext.service" in ctl
+    assert "stop fnmusic-sources.service" in ctl
+    assert not sb.docker_log.exists()
 
 
 def test_main_status_exit_codes(sb):

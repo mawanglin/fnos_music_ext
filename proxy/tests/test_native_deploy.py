@@ -162,33 +162,41 @@ def test_native_unit_template_shape():
 
 # ------------------------------------------------- install.sh 形态解析/迁移 ---
 
-def test_resolve_deploy_mode_explicit_and_env_inherit(tmp_path):
+def test_resolve_deploy_mode_is_always_native(tmp_path):
+    """native-only fork：无论有没有 docker、.env 记录什么，部署形态恒为 native。"""
     install = (BASE / "install.sh").read_text(encoding="utf-8")
     funcs = (function(install, "run_docker") + function(install, "resolve_deploy_mode"))
-    # 1) 显式 --deploy native 优先（机器上连 docker 命令都没有也成立）
-    r = run_bash(
-        f'{funcs}\nDEPLOY_MODE_CLI="native" NON_INTERACTIVE=1 resolve_deploy_mode; echo "$DEPLOY_MODE"',
-        env={"BASE_DIR": str(tmp_path)},
-    )
-    assert r.returncode == 0 and r.stdout.strip().endswith("native")
-    # 2) 未显式指定时沿用 .env 既有形态（升级/重装不悄悄换形态）
-    (tmp_path / ".env").write_text("FNMUSIC_DEPLOY_MODE='native'\n", encoding="utf-8")
     stub_bin = tmp_path / "bin"
     stub_bin.mkdir(exist_ok=True)
     (stub_bin / "docker").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     (stub_bin / "docker").chmod(0o755)
+    for cli, env_text, with_docker in (
+        ("native", None, False),   # 显式 native，机器上没有 docker
+        ("", None, True),          # 缺省：即使 docker 可用也是 native
+        ("", "FNMUSIC_DEPLOY_MODE='native'\n", True),
+        ("", "FNMUSIC_DEPLOY_MODE='docker'\n", True),  # 旧 docker 安装 → 迁移为 native
+    ):
+        env_file = tmp_path / ".env"
+        env_file.unlink(missing_ok=True)
+        if env_text:
+            env_file.write_text(env_text, encoding="utf-8")
+        path = f"{stub_bin}:{os.environ['PATH']}" if with_docker else os.environ["PATH"]
+        r = run_bash(
+            f'{funcs}\nDEPLOY_MODE_CLI="{cli}" NON_INTERACTIVE=1 resolve_deploy_mode; echo "$DEPLOY_MODE"',
+            env={"BASE_DIR": str(tmp_path), "PATH": path},
+        )
+        assert r.returncode == 0 and r.stdout.strip().endswith("native"), (cli, env_text, r.stderr)
+
+
+def test_resolve_deploy_mode_rejects_explicit_docker(tmp_path):
+    install = (BASE / "install.sh").read_text(encoding="utf-8")
+    funcs = (function(install, "run_docker") + function(install, "resolve_deploy_mode"))
     r = run_bash(
-        f'{funcs}\nDEPLOY_MODE_CLI="" NON_INTERACTIVE=1 resolve_deploy_mode; echo "$DEPLOY_MODE"',
-        env={"BASE_DIR": str(tmp_path), "PATH": f"{stub_bin}:{os.environ['PATH']}"},
+        f'log_err() {{ echo "$*" >&2; }}\n{funcs}\nDEPLOY_MODE_CLI="docker" NON_INTERACTIVE=1 resolve_deploy_mode',
+        env={"BASE_DIR": str(tmp_path)},
     )
-    assert r.returncode == 0 and r.stdout.strip().endswith("native")
-    # 3) .env=docker + docker 可用 → docker
-    (tmp_path / ".env").write_text("FNMUSIC_DEPLOY_MODE='docker'\n", encoding="utf-8")
-    r = run_bash(
-        f'{funcs}\nDEPLOY_MODE_CLI="" NON_INTERACTIVE=1 resolve_deploy_mode; echo "$DEPLOY_MODE"',
-        env={"BASE_DIR": str(tmp_path), "PATH": f"{stub_bin}:{os.environ['PATH']}"},
-    )
-    assert r.returncode == 0 and r.stdout.strip().endswith("docker")
+    assert r.returncode != 0
+    assert "native-only" in (r.stderr + r.stdout)
 
 
 def test_resolve_deploy_mode_rejects_unknown_value(tmp_path):

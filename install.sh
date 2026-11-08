@@ -104,7 +104,7 @@ WEBUI_CHOICE=""
 CONTAINER_NAME="fnmusic-sources"
 # 部署形态：docker（默认，单容器）| native（原生宿主机 systemd + supervisord，无 Docker）
 DEPLOY_MODE_CLI=""
-DEPLOY_MODE="docker"
+DEPLOY_MODE="native"
 MODE_LABEL_DOCKER="Docker 单容器·按需加载"
 MODE_LABEL_NATIVE="原生宿主机·按需加载（无 Docker）"
 MODE_LABEL="${MODE_LABEL_DOCKER}"
@@ -665,51 +665,21 @@ run_docker() {
 # Docker 路径行为与 v2.7.0 前完全一致；仅无 docker 命令或显式 --deploy native 时
 # 才进入原生模式，已有 fpk/docker 用户升级不受影响。
 resolve_deploy_mode() {
+    # native-only 分支（fork）：fpk 只提供原生部署，不再接受 docker 形态。
+    # 既有 .env 里的 FNMUSIC_DEPLOY_MODE=docker 视为待迁移：本次安装会改写为 native，
+    # 并由 install_sources_native 移除同目录的旧 Docker 音源容器（数据目录原样共用）。
     case "${DEPLOY_MODE_CLI}" in
-        "") ;;
-        docker|native) DEPLOY_MODE="${DEPLOY_MODE_CLI}"; return 0 ;;
+        ""|native) ;;
+        docker)
+            log_err "本发行版（native-only）不再支持 Docker 部署，仅支持原生宿主机部署。"
+            exit 1
+            ;;
         *)
-            log_err "--deploy 仅支持 docker 或 native: ${DEPLOY_MODE_CLI}"
+            log_err "--deploy 仅支持 native: ${DEPLOY_MODE_CLI}"
             exit 1
             ;;
     esac
-    if [ -f "${BASE_DIR}/.env" ]; then
-        local prev
-        prev="$(sed -n "s/^[[:space:]]*\(export[[:space:]]\+\)\?FNMUSIC_DEPLOY_MODE=//p" "${BASE_DIR}/.env" 2>/dev/null | tail -1 | tr -d "\"'[:space:]")"
-        case "${prev}" in
-            docker|native) DEPLOY_MODE="${prev}"; return 0 ;;
-        esac
-    fi
-    if command -v docker >/dev/null 2>&1; then
-        if [ "${DEPLOY_MODE_CLI}" = "native" ]; then
-            DEPLOY_MODE="native"
-            return 0
-        fi
-        if ! run_docker info >/dev/null 2>&1; then
-            # docker 命令在但 daemon 不可达：维持既有硬错误语义（不静默换形态）
-            log_err "docker 服务未运行（docker info 失败）：请启动 Docker 后重试。"
-            log_err "如本机不再使用 Docker，可改用原生模式: ./install.sh --deploy native"
-            exit 1
-        fi
-        DEPLOY_MODE="docker"
-        return 0
-    fi
-    if [ "${NON_INTERACTIVE}" -eq 1 ]; then
-        log_err "未检测到 docker：Docker 模式需先安装并启动 Docker；"
-        log_err "无 Docker 机器请使用原生模式安装: ./install.sh --deploy native"
-        exit 1
-    fi
-    log_warn "未检测到 docker（本机未安装）。"
-    if [ -t 0 ]; then
-        local ans
-        # 此处尚未到向导段（prompt 未定义），直接 read；仅 tty 交互可达
-        read -r -p "是否改用原生（无 Docker，宿主机 systemd + supervisord）模式安装? [y/N] " ans || ans=""
-        case "${ans}" in
-            y|Y|yes|YES) DEPLOY_MODE="native"; return 0 ;;
-        esac
-    fi
-    log_err "未检测到 docker：已取消安装。安装 Docker 后重试，或使用 --deploy native 原生模式。"
-    exit 1
+    DEPLOY_MODE="native"
 }
 
 resolve_deploy_mode
@@ -1922,7 +1892,7 @@ if [ "${ENABLE_LX}" -eq 1 ] && [ -n "${LX_SOURCE_URLS}" ]; then
 fi
 
 takeover preflight --base "${BASE_DIR}"
-for script in extend.sh restore.sh proxy/run_proxy.sh proxy/install_common.sh netease_login.sh ensure_base_image.sh ensure_sources_native.sh; do
+for script in extend.sh restore.sh proxy/run_proxy.sh proxy/install_common.sh netease_login.sh ensure_sources_native.sh; do
     bash -n "${BASE_DIR}/${script}"
 done
 

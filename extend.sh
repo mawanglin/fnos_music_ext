@@ -156,14 +156,11 @@ is_enabled "${FNMUSIC_NETEASE_ENABLED:-true}" && ENABLE_MUSICBOX=1
 is_enabled "${FNMUSIC_LX_ENABLED:-false}" && ENABLE_LX=1
 is_enabled "${FNMUSIC_WEBUI_ENABLED:-false}" && ENABLE_WEBUI=1
 # 部署形态（v2.8.0a+）：docker（默认，单容器）| native（宿主机 systemd + supervisord）
-DEPLOY_MODE="${FNMUSIC_DEPLOY_MODE:-docker}"
-case "${DEPLOY_MODE}" in
-    docker|native) : ;;
-    *)
-        log_err ".env 的 FNMUSIC_DEPLOY_MODE 仅支持 docker 或 native: ${DEPLOY_MODE}"
-        exit 1
-        ;;
-esac
+# native-only 分支（fork）：只支持原生部署；旧 .env 里的 docker 形态由升级时的 install.sh 迁移。
+DEPLOY_MODE="native"
+if [ "${FNMUSIC_DEPLOY_MODE:-native}" = "docker" ]; then
+    log_warn ".env 仍记录 FNMUSIC_DEPLOY_MODE=docker：本发行版仅支持原生部署，请执行 ./install.sh --adopt 迁移。"
+fi
 if [ "${ENABLE_MUSICDL}" -eq 0 ] && [ "${ENABLE_MUSICBOX}" -eq 0 ] && [ "${ENABLE_LX}" -eq 0 ]; then
     log_err "至少需要启用一个音源（FNMUSIC_MUSICDL_ENABLED / FNMUSIC_NETEASE_ENABLED / FNMUSIC_LX_ENABLED）。"
     exit 1

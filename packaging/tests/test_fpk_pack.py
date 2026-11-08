@@ -285,12 +285,21 @@ class TestPayload:
         repo = stage / "app" / "repo"
         for rel in (
             "install.sh", "extend.sh", "restore.sh",
-            "docker-compose.yml", ".env.example", ".dockerignore",
-            "fnmusic-ext.service", "VERSION",
-            "proxy/app.py", "container/Dockerfile", "webui-service/app.py",
+            ".env.example", "fnmusic-ext.service", "VERSION",
+            "ensure_sources_native.sh", "fnmusic-sources-native.service.in",
+            "container/entrypoint.sh", "container/env_flag.sh",
+            "container/supervisord-native.conf.in",
+            "proxy/app.py", "webui-service/app.py",
             "lxmusic-service/verify_source.py", "container/lxserver_compat.py",
         ):
             assert (repo / rel).is_file(), f"payload 缺少运行所需文件 {rel}"
+
+    def test_docker_files_not_shipped(self, stage: Path):
+        """native-only 分支：fpk 不含任何 Docker 构建/编排文件。"""
+        repo = stage / "app" / "repo"
+        for rel in ("docker-compose.yml", ".dockerignore", "ensure_base_image.sh",
+                    "container/Dockerfile", "container/supervisord.conf"):
+            assert not (repo / rel).exists(), f"payload 不应包含 Docker 文件 {rel}"
 
     def test_arm64_native_binding_is_embedded(self, stage: Path):
         repo = stage / "app" / "repo"

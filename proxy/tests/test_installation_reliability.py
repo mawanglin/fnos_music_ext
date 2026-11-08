@@ -550,33 +550,6 @@ def test_env_write_platform_keys_explicit_only():
     assert './sources-data:/data' in compose and '.:/repo' in compose
 
 
-def test_docker_only_gate_blocks_without_docker(tmp_path):
-    """v2.0.0 仅 Docker：无 docker / daemon 未运行直接报错退出安装。"""
-    text = (BASE/'install.sh').read_text(encoding='utf-8')
-    block = text[text.index('while [ $# -gt 0 ]'):text.index('\nprecheck_environment')]
-    stubs = 'log_err() { printf "%s\\n" "$*" >&2; }\nusage() { :; }\n'
-    bash = shutil.which('bash')
-    argv = lambda script: [bash, '-c', stubs + script, 'install.sh', '--sources', 'musicdl']
-    # 1) PATH 里没有 docker
-    empty = tmp_path/'empty'; empty.mkdir()
-    result = subprocess.run(argv(block),
-                            env={**os.environ, 'PATH': str(empty)}, capture_output=True, text=True)
-    assert result.returncode != 0 and '未检测到 docker' in result.stderr
-    # 2) docker 命令存在但 daemon 不通（PATH 仅含 stub，避免 sudo 找到真 docker 兜底）
-    bindir = tmp_path/'bin'; bindir.mkdir()
-    (bindir/'docker').write_text('#!/bin/sh\nexit 1\n'); (bindir/'docker').chmod(0o755)
-    result = subprocess.run(argv(block),
-                            env={**os.environ, 'PATH': str(bindir)},
-                            capture_output=True, text=True)
-    assert result.returncode != 0 and 'docker 服务未运行' in result.stderr
-    # 3) docker 可用：闸门放行
-    (bindir/'docker').write_text('#!/bin/sh\nexit 0\n')
-    result = subprocess.run(argv(block + '\nprintf "gate-passed\\n"'),
-                            env={**os.environ, 'PATH': str(bindir)},
-                            capture_output=True, text=True)
-    assert result.returncode == 0 and 'gate-passed' in result.stdout, result.stderr
-
-
 def test_host_mode_removed():
     text = (BASE/'install.sh').read_text(encoding='utf-8')
     # --mode 参数直接报错（给出明确迁移指引）
@@ -695,7 +668,8 @@ def test_extend_lx_user_source_probe_states():
 def test_extend_docker_only_and_single_container_probe():
     text = (BASE/'extend.sh').read_text(encoding='utf-8')
     # v2.8.0a 双形态分派：native 走宿主机 unit；docker 分支保持单容器 fnmusic-sources
-    assert 'DEPLOY_MODE="${FNMUSIC_DEPLOY_MODE:-docker}"' in text
+    # native-only fork：形态恒为 native，旧 .env 的 docker 仅告警并由 install.sh --adopt 迁移
+    assert 'DEPLOY_MODE="native"' in text
     assert 'ensure_native_sources' in text
     assert 'NATIVE_UNIT_NAME' in text
     assert 'CONTAINER_NAME="fnmusic-sources"' in text

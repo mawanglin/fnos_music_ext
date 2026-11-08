@@ -5,6 +5,18 @@
 
 ## [Unreleased]
 
+## [2.12.3-n1] - 2026-11-09
+
+原生版（native-only fork）首个版本：同步上游 `v2.12.3` 基线（`javycoder/fnos_music_ext`），FPK 安装版本 `2.12.3-1`，tag / WebUI 显示 `v2.12.3-n1`，发布通道 `fork`。适配飞牛音乐 `1.0.10` 与 `1.1.19`。
+
+### 变更
+- **fpk 不再包含 Docker**：安装、升级、启停、卸载全部走原生宿主机 systemd + supervisord（沿用上游已有的 native 形态，功能与上游 Docker 形态一致）。安装向导与预检不再要求 Docker；fpk 载荷剔除 `docker-compose.yml`、`.dockerignore`、`container/Dockerfile`、`container/supervisord.conf`、`ensure_base_image.sh`。
+- `install.sh` 恒定使用 native；`--deploy docker` 明确报错。`extend.sh` 恒定 native，旧 `.env` 的 `FNMUSIC_DEPLOY_MODE=docker` 会提示并在升级安装时迁移（同目录旧 Docker 音源容器被移除，数据目录原样沿用）。
+- 应用中心「停止」现在同时停止原生音源服务 `fnmusic-sources.service`（此前只停代理与 compose 容器，原生音源会继续占端口与内存）；安装/升级失败回滚时同样停掉它；卸载时停用并移除该 unit。
+- 版本号：新增 `fork` 发布通道（`VERSION=x.y.z-N`，N≥1 为自有小版本号，对外显示 `x.y.z-nN`），不与上游 tag 冲突，便于持续同步上游基线。
+- 检查更新只指向本 fork 的 GitHub Releases（不再检查上游或 Gitee）；关于页链接指向本 fork。
+- 发布工作流改为只发 GitHub Release（tag `v*-n*`，不要求合入 main，不回填 moo、不发 Gitee）；CI 移除 Docker 镜像多架构构建任务。
+
 ## [2.12.3] - 2026-11-07
 
 FPK 安装版本 `2.12.3-0`，tag / WebUI 显示 `v2.12.3`，发布通道 `stable`。适配飞牛音乐 `1.0.10` 与 `1.1.19`。

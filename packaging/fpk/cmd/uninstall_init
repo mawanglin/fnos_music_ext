@@ -1,5 +1,5 @@
 #!/bin/bash
-# Restore the official music app first (socket, systemd unit, containers),
+# Restore the official music app first (socket, systemd units, legacy containers),
 # then always archive user data to the storage volume root before removal
 # (uninstall deletes the app directory; the archive is the user's escape hatch).
 set -uo pipefail
@@ -21,7 +21,12 @@ if [ -n "${FNMUSIC_REPO_DIR}" ] && [ -f "${FNMUSIC_REPO_DIR}/restore.sh" ]; then
         systemctl disable fnmusic-ext.service >> "${FNMUSIC_LOG}" 2>&1 || true
         rm -f "${FNMUSIC_UNIT_FILE}"
         systemctl daemon-reload >> "${FNMUSIC_LOG}" 2>&1 || true
-        docker rm -f fnmusic-sources >> "${FNMUSIC_LOG}" 2>&1 || true
+        systemctl disable --now fnmusic-sources.service >> "${FNMUSIC_LOG}" 2>&1 || true
+        rm -f "${FNMUSIC_SOURCES_UNIT_FILE:-/etc/systemd/system/fnmusic-sources.service}"
+        systemctl daemon-reload >> "${FNMUSIC_LOG}" 2>&1 || true
+        if command -v docker >/dev/null 2>&1; then
+            docker rm -f fnmusic-sources >> "${FNMUSIC_LOG}" 2>&1 || true
+        fi
         rm -f "${FNMUSIC_DEPLOYMENT_FILE}"
     fi
 fi
