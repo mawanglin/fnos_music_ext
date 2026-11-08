@@ -400,8 +400,9 @@ def test_packaging_uses_install_version_in_fpk_name_and_manifest():
     build = (root / "packaging/fpk/build.sh").read_text(encoding="utf-8")
     manifest = (root / "packaging/fpk/manifest.in").read_text(encoding="utf-8")
     assert 'VERSION="$(python3 "${REPO_ROOT}/proxy/version.py" --format version)"' in build
-    assert 'FINAL="${OUT_DIR}/fnmusic-ext-${VERSION}.fpk"' in build
-    assert 'sed "s/@VERSION@/${VERSION}/"' in build
+    # native-only fork：每个架构各一个包，文件名 fnmusic-ext-<安装版本>-<x86|arm>.fpk
+    assert 'FINAL="${OUT_DIR}/fnmusic-ext-${VERSION}-${ARCH}.fpk"' in build
+    assert 's/@VERSION@/${VERSION}/' in build and 's/@PLATFORM@/${ARCH}/' in build
     assert "version               = @VERSION@" in manifest
 
     version = (root / "VERSION").read_text(encoding="utf-8").strip()

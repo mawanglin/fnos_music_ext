@@ -88,19 +88,37 @@ jobs:
 
       - name: Verify donation assets in fpk
         run: |
-          fpk_file="$(ls dist/fnmusic-ext-*.fpk)"
-          python3 scripts/check_donate_assets.py "$fpk_file"
+          for fpk_file in dist/fnmusic-ext-*.fpk; do
+            python3 scripts/check_donate_assets.py "$fpk_file"
+          done
 
-      - name: Verify the fpk contains no Docker files
+      - name: Verify the fpks (x86 + arm) are self-contained and Docker-free
         run: |
-          fpk_file="$(ls dist/fnmusic-ext-*.fpk)"
-          rm -rf /tmp/fpk-inspect && mkdir -p /tmp/fpk-inspect/app
-          tar -xf "$fpk_file" -C /tmp/fpk-inspect
-          tar -xzf /tmp/fpk-inspect/app.tgz -C /tmp/fpk-inspect/app
-          test -f /tmp/fpk-inspect/app/repo/ensure_sources_native.sh
-          if find /tmp/fpk-inspect/app \( -name docker-compose.yml -o -name Dockerfile -o -name ensure_base_image.sh \) | grep -q .; then
-            echo "fpk 不应包含 Docker 文件" >&2; exit 1
-          fi
+          ver="$(python3 proxy/version.py --format version)"
+          for arch in x86 arm; do
+            fpk_file="dist/fnmusic-ext-${ver}-${arch}.fpk"
+            test -s "$fpk_file" && test -s "${fpk_file}.sha256"
+            work="$(mktemp -d)"
+            tar -xf "$fpk_file" -C "$work"
+            grep -qx "platform              = ${arch}" "$work/manifest"
+            mkdir -p "$work/app" && tar -xzf "$work/app.tgz" -C "$work/app"
+            test -f "$work/app/repo/runtime/BUNDLED"
+            test -x "$work/app/repo/runtime/python/bin/python3"
+            test -x "$work/app/repo/runtime/ffmpeg/ffmpeg"
+            test -x "$work/app/repo/runtime/site-sources/nodejs_wheel/bin/node"
+            test -f "$work/app/repo/ensure_sources_native.sh"
+            if find "$work/app" \( -name docker-compose.yml -o -name Dockerfile -o -name ensure_base_image.sh \) | grep -q .; then
+              echo "${arch} fpk 不应包含 Docker 文件" >&2; exit 1
+            fi
+            want="x86-64"; [ "$arch" = arm ] && want="aarch64"
+            for elf in python/bin/python3.13 site-sources/nodejs_wheel/bin/node ffmpeg/ffmpeg; do
+              file -b "$work/app/repo/runtime/$elf" | grep -qi "$want" || { echo "$elf 不是 $want" >&2; exit 1; }
+            done
+            if [ -n "$(find "$work/app" -type l -lname '/*')" ]; then
+              echo "${arch} fpk 内有绝对路径符号链接（飞牛会解压失败）" >&2; exit 1
+            fi
+            rm -rf "$work"
+          done
 
       - name: Extract changelog for this version
         run: |
@@ -120,16 +138,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          fpk_file="$(ls dist/fnmusic-ext-*.fpk)"
           ver="${TAG#v}"
-          title="fnmusic-ext ${ver}（原生版）"
+          title="fnmusic-ext ${ver}（原生版，x86 + arm 各一个包，内置运行时）"
+          assets=(dist/fnmusic-ext-*.fpk dist/fnmusic-ext-*.fpk.sha256)
           if gh release view "${TAG}" >/dev/null 2>&1; then
             gh release edit "${TAG}" --draft=false --title "$title" --notes-file /tmp/release-notes.md --prerelease=false --latest
-            gh release upload "${TAG}" "$fpk_file" "$fpk_file.sha256" --clobber
+            gh release upload "${TAG}" "${assets[@]}" --clobber
           else
             gh release create "${TAG}" \
               --title "$title" \
               --notes-file /tmp/release-notes.md \
               --latest \
-              "$fpk_file" "$fpk_file.sha256"
+              "${assets[@]}"
           fi

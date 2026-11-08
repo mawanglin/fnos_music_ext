@@ -37,6 +37,7 @@ else
         fi
         return 1
     }
+    fnmusic_bundled() { return 1; }
     deps_requirements_digest() { sha256sum "$@" 2>/dev/null | awk '{print $1}' | sha256sum | awk '{print $1}'; }
     deps_state_valid() { return 1; }
     deps_write_state() { :; }
@@ -59,6 +60,18 @@ if ! choose_python_bin; then
 fi
 PYTHON_BIN="${FNMUSIC_SELECTED_PYTHON}"
 log_info "选用 Python: ${PYTHON_BIN} ($(runtime_python_version "${PYTHON_BIN}")，来源: ${FNMUSIC_PYTHON_SOURCE})"
+
+# 内置运行时（native-only fpk）：离线组装 venv，不联网、不调用 pip/apt。
+if fnmusic_bundled; then
+    log_info "使用包内置运行时，离线准备代理环境 ${VENV_DIR} ..."
+    bundled_make_venv "${VENV_DIR}" proxy || { log_err "内置运行时组装失败：${VENV_DIR}"; exit 1; }
+    if ! deps_imports_ok "${VENV_DIR}/bin/python" fastapi uvicorn httpx mutagen; then
+        log_err "内置依赖校验失败（关键模块无法导入），安装包可能损坏，请重新下载安装。"
+        exit 1
+    fi
+    log_info "代理依赖已就绪（内置，无需联网）。"
+    exit 0
+fi
 
 if [ ! -x "${VENV_DIR}/bin/python" ]; then
     log_info "创建虚拟环境 ${VENV_DIR} ..."

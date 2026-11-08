@@ -1,6 +1,49 @@
 #!/usr/bin/env bash
 # Shared host-runtime discovery for installers. Sourcing this file has no side effects.
 
+# ---- 内置运行时（native-only fpk）---------------------------------------------
+# fpk 自带 Python / 依赖 / Node / ffmpeg 于 <BASE_DIR>/runtime（由 packaging/fpk/fetch_runtime.py 生成，
+# 以 runtime/BUNDLED 为标记）。存在标记即“内置模式”：只用包内文件，安装时不联网、不调用 apt/pip，
+# 不改动系统。源码安装（无标记）仍走下面的宿主机探测，与上游行为一致。
+fnmusic_runtime_dir() {
+    printf '%s' "${FNMUSIC_RUNTIME_DIR:-${BASE_DIR:-.}/runtime}"
+}
+
+fnmusic_bundled() {
+    [ -f "$(fnmusic_runtime_dir)/BUNDLED" ]
+}
+
+# 用内置 Python 离线创建 venv，并把内置依赖目录挂进去（不需要 pip）：
+#   bundled_make_venv <venv 目录> <依赖目录名: proxy|sources>
+# venv 不含用户数据，路径或来源变化（应用换卷）时直接重建。
+bundled_make_venv() {
+    local venv="$1" kind="$2"
+    local rt py site scripts home_line stamp purelib
+    rt="$(fnmusic_runtime_dir)"
+    py="${rt}/python/bin/python3"
+    site="${rt}/site-${kind}"
+    scripts="${rt}/scripts-${kind}"
+    [ -x "${py}" ] || { echo "内置 Python 缺失: ${py}" >&2; return 1; }
+    [ -d "${site}" ] || { echo "内置依赖目录缺失: ${site}" >&2; return 1; }
+    home_line="home = ${rt}/python/bin"
+    stamp="${venv}/.fnmusic-bundled"
+    if [ ! -x "${venv}/bin/python" ] \
+       || ! grep -qxF "${home_line}" "${venv}/pyvenv.cfg" 2>/dev/null \
+       || [ "$(cat "${stamp}" 2>/dev/null)" != "${site}" ]; then
+        rm -rf "${venv}"
+        "${py}" -m venv --without-pip "${venv}" || return 1
+    fi
+    purelib="$("${venv}/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')" || return 1
+    mkdir -p "${purelib}"
+    # 经 addsitedir 挂载：依赖里自带的 .pth 也会被处理
+    printf 'import site; site.addsitedir(%s)\n' "$("${py}" -c 'import sys; print(repr(sys.argv[1]))' "${site}")" \
+        > "${purelib}/fnmusic_bundled.pth"
+    if [ -d "${scripts}" ]; then
+        cp -af "${scripts}/." "${venv}/bin/" || return 1
+    fi
+    printf '%s\n' "${site}" > "${stamp}"
+}
+
 runtime_python_ok() {
     local bin="$1"
     local resolved
@@ -32,6 +75,15 @@ choose_python_bin() {
     local candidate
     FNMUSIC_SELECTED_PYTHON=""
     FNMUSIC_PYTHON_SOURCE=""
+    if fnmusic_bundled; then
+        candidate="$(fnmusic_runtime_dir)/python/bin/python3"
+        if runtime_python_ok "${candidate}"; then
+            FNMUSIC_SELECTED_PYTHON="${candidate}"
+            FNMUSIC_PYTHON_SOURCE="bundled"
+            return 0
+        fi
+        return 1  # 内置模式下不回落到系统 Python：包损坏应明确报错
+    fi
     if [ -n "${FNMUSIC_PYTHON_BIN:-}" ]; then
         if ! runtime_python_ok "${FNMUSIC_PYTHON_BIN}"; then
             return 1
@@ -97,6 +149,15 @@ choose_node_bin() {
     local candidate
     FNMUSIC_SELECTED_NODE=""
     FNMUSIC_NODE_SOURCE=""
+    if fnmusic_bundled; then
+        candidate="$(fnmusic_runtime_dir)/site-sources/nodejs_wheel/bin/node"
+        if runtime_node_ok "${candidate}"; then
+            FNMUSIC_SELECTED_NODE="${candidate}"
+            FNMUSIC_NODE_SOURCE="bundled"
+            return 0
+        fi
+        return 1
+    fi
     if [ -n "${FNMUSIC_NODE_BIN:-}" ]; then
         if ! runtime_node_ok "${FNMUSIC_NODE_BIN}"; then
             return 1
@@ -163,6 +224,19 @@ runtime_tool_path() {
 }
 
 choose_media_bins() {
+    if fnmusic_bundled && [ -z "${FNMUSIC_FFMPEG_BIN:-}" ] && [ -z "${FNMUSIC_FFPROBE_BIN:-}" ]; then
+        local rt
+        rt="$(fnmusic_runtime_dir)/ffmpeg"
+        if [ -x "${rt}/ffmpeg" ]; then
+            FNMUSIC_SELECTED_FFMPEG="${rt}/ffmpeg"
+            FNMUSIC_SELECTED_FFPROBE=""
+            [ -x "${rt}/ffprobe" ] && FNMUSIC_SELECTED_FFPROBE="${rt}/ffprobe"
+            return 0
+        fi
+        FNMUSIC_SELECTED_FFMPEG=""
+        FNMUSIC_SELECTED_FFPROBE=""
+        return 1
+    fi
     FNMUSIC_SELECTED_FFMPEG="$(runtime_tool_path "${FNMUSIC_FFMPEG_BIN:-}" ffmpeg || true)"
     FNMUSIC_SELECTED_FFPROBE="$(runtime_tool_path "${FNMUSIC_FFPROBE_BIN:-}" ffprobe || true)"
     [ -n "${FNMUSIC_SELECTED_FFMPEG}" ]

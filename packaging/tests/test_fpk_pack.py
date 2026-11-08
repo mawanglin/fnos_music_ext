@@ -67,7 +67,7 @@ class TestManifest:
         m = _parse_manifest((stage / "manifest").read_text(encoding="utf-8"))
         assert m["appname"] == APPNAME
         assert m["source"] == "thirdparty"
-        assert m["platform"] == "all"
+        assert m["platform"] in ("x86", "arm")  # native-only：按架构各出一个包
         assert m["desktop_uidir"] == "ui"
         assert m["desktop_applaunchname"] == ENTRY_ID
         assert "trim.music" in m["install_dep_apps"]
@@ -303,8 +303,18 @@ class TestPayload:
         leftovers = [p for p in repo.rglob("*") if p.name in (".dockerignore", "Dockerfile")]
         assert not leftovers, f"payload 不应包含任何 .dockerignore/Dockerfile: {leftovers}"
 
-    def test_arm64_native_binding_is_embedded(self, stage: Path):
+    def test_x86_stage_has_no_arm64_binding_and_declares_platform(self, stage: Path):
+        """默认（x86）组装：不带 ARM64 绑定，manifest 声明 platform = x86。"""
         repo = stage / "app" / "repo"
+        assert not list((repo / "container/lxserver-artifact").glob("music-tag-native-linux-arm64-gnu-*.tgz"))
+        manifest = _parse_manifest((stage / "manifest").read_text(encoding="utf-8"))
+        assert manifest["platform"] == "x86"
+
+    def test_arm_stage_embeds_locked_arm64_binding(self, tmp_path_factory):
+        out = tmp_path_factory.mktemp("fpk-stage-arm")
+        subprocess.run(["bash", str(FPK_DIR / "build.sh"), "--stage-only", str(out), "--arch", "arm"],
+                       check=True, capture_output=True, text=True)
+        repo = out / "app" / "repo"
         version = {}
         for line in (repo / "container/lxserver.version").read_text(encoding="utf-8").splitlines():
             key, _, value = line.partition("=")
@@ -312,8 +322,10 @@ class TestPayload:
                 version[key] = value
         expected = f"music-tag-native-linux-arm64-gnu-{version['LXSERVER_NATIVE_VERSION']}.tgz"
         artifact = repo / "container/lxserver-artifact" / expected
-        assert artifact.is_file(), f"FPK 缺少 ARM64 原生模块 {expected}"
+        assert artifact.is_file(), f"ARM FPK 缺少 ARM64 原生模块 {expected}"
         assert hashlib.sha256(artifact.read_bytes()).hexdigest() == version["LXSERVER_NATIVE_ARM64_SHA256"]
+        manifest = _parse_manifest((out / "manifest").read_text(encoding="utf-8"))
+        assert manifest["platform"] == "arm"
 
     def test_no_dev_files_or_secrets(self, stage: Path):
         repo = stage / "app" / "repo"

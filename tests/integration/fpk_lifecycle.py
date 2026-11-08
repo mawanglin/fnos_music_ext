@@ -160,11 +160,13 @@ def preflight(args) -> None:
 
 def build_fpk(args) -> Path:
     print("[build] packaging/fpk/build.sh", flush=True)
-    out = run(["bash", str(REPO_ROOT / "packaging" / "fpk" / "build.sh")], timeout=300)
+    # native-only：按本机架构只打一个包（x86 或 arm），内置运行时需联网下载，放宽超时
+    arch = "arm" if os.uname().machine in ("aarch64", "arm64") else "x86"
+    out = run(["bash", str(REPO_ROOT / "packaging" / "fpk" / "build.sh"), "--arch", arch], timeout=1800)
     if out.returncode != 0:
         sys.exit(f"build.sh 失败:\n{out.stdout}\n{out.stderr}")
     version = (REPO_ROOT / "VERSION").read_text().strip()
-    fpk = REPO_ROOT / "dist" / f"fnmusic-ext-{version}.fpk"
+    fpk = REPO_ROOT / "dist" / f"fnmusic-ext-{version}-{arch}.fpk"
     if not fpk.is_file():
         sys.exit(f"未找到打包产物 {fpk}")
     print(f"[build] {fpk} ({fpk.stat().st_size} bytes)", flush=True)

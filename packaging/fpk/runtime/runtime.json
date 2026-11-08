@@ -1,0 +1,33 @@
+{
+  "_comment": "native-only fork：fpk 内置运行时的版本与校验和锁。升级任何一项都要同时更新 sha256；构建时校验失败即中止。",
+  "python": {
+    "version": "3.13.18",
+    "release": "20261026",
+    "url": "https://github.com/astral-sh/python-build-standalone/releases/download/{release}/cpython-{version}+{release}-{triple}-install_only_stripped.tar.gz",
+    "triples": {"x86": "x86_64-unknown-linux-gnu", "arm": "aarch64-unknown-linux-gnu"},
+    "sha256": {
+      "x86": "df15fe60d3ff55bf9dcf25824b5572756bb8816ff93865a273d3301d7066a8b7",
+      "arm": "578d9da1983463ffb0c8c98ab0da2f18177f44069328eb0af847860c1eb05c3e"
+    }
+  },
+  "ffmpeg": {
+    "version": "7.0.2",
+    "license": "GPLv3（johnvansickle.com 静态构建，随包附带 GPLv3 文本与来源说明）",
+    "url": {
+      "x86": "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz",
+      "arm": "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-arm64-static.tar.xz"
+    },
+    "sha256": {
+      "x86": "abda8d77ce8309141f83ab8edf0596834087c52467f6badf376a6a2a4c87cf67",
+      "arm": "f4149bb2b0784e30e99bdda85471c9b5930d3402014e934a5098b41d0f7201b1"
+    }
+  },
+  "wheels": {
+    "python_version": "3.13",
+    "platforms": {
+      "x86": ["manylinux_2_28_x86_64", "manylinux_2_17_x86_64", "manylinux2014_x86_64", "manylinux_2_34_x86_64", "manylinux_2_35_x86_64", "manylinux_2_39_x86_64"],
+      "arm": ["manylinux_2_28_aarch64", "manylinux_2_17_aarch64", "manylinux2014_aarch64", "manylinux_2_34_aarch64", "manylinux_2_35_aarch64", "manylinux_2_39_aarch64"]
+    },
+    "locks": {"proxy": "requirements-proxy.lock", "sources": "requirements-sources.lock"}
+  }
+}

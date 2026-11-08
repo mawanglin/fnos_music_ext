@@ -115,27 +115,43 @@ jobs:
           ./packaging/fpk/build.sh
           ls -la dist/
 
-      - name: Verify package artifact
+      - name: Verify package artifacts (x86 + arm)
         run: |
-          fpk_file="$(ls dist/fnmusic-ext-*.fpk)"
-          test -s "$fpk_file"
-          test -s "${fpk_file}.sha256"
-          # fpk 为 tar.gz；app.tgz 承载 target/ 内容，应用骨架留在 fpk 顶层。
-          for path in app.tgz cmd/main config/privilege config/resource \
-            wizard/install manifest ICON.PNG ICON_256.PNG; do
-            tar -tzf "$fpk_file" | grep -qx "$path" || {
-              echo "ERROR: fpk 缺少顶层 $path" >&2; exit 1; }
+          for arch in x86 arm; do
+            fpk_file="dist/fnmusic-ext-$(python3 proxy/version.py --format version)-${arch}.fpk"
+            test -s "$fpk_file"
+            test -s "${fpk_file}.sha256"
+            # fpk 为 tar.gz；app.tgz 承载 target/ 内容，应用骨架留在 fpk 顶层。
+            for path in app.tgz cmd/main config/privilege config/resource \
+              wizard/install manifest ICON.PNG ICON_256.PNG; do
+              tar -tzf "$fpk_file" | grep -qx "$path" || {
+                echo "ERROR: ${arch} fpk 缺少顶层 $path" >&2; exit 1; }
+            done
+            app_tmp="$(mktemp -d)"
+            tar -xzf "$fpk_file" -C "$app_tmp" app.tgz manifest
+            grep -qx "platform              = ${arch}" "$app_tmp/manifest" || {
+              echo "ERROR: ${arch} fpk 的 manifest platform 不对" >&2; exit 1; }
+            for path in ui/config ui/images/icon_64.png ui/images/icon_256.png \
+              config/privilege config/resource repo/proxy/llm_usage.py repo/FNMUSIC_COMPAT.json \
+              repo/runtime/BUNDLED repo/runtime/python/bin/python3 repo/runtime/ffmpeg/ffmpeg \
+              repo/runtime/site-sources/nodejs_wheel/bin/node repo/ensure_sources_native.sh; do
+              tar -tzf "$app_tmp/app.tgz" | grep -qx "$path" || {
+                echo "ERROR: ${arch} app.tgz 缺少 $path" >&2; exit 1; }
+            done
+            # native-only：包内不得有 Docker 文件
+            if tar -tzf "$app_tmp/app.tgz" | grep -Ei '(^|/)(docker-compose\.yml|Dockerfile|ensure_base_image\.sh)$'; then
+              echo "ERROR: ${arch} fpk 含 Docker 文件" >&2; exit 1
+            fi
+            # 架构自洽：ELF 头必须和包声明的架构一致
+            tar -xzf "$app_tmp/app.tgz" -C "$app_tmp" repo/runtime/python/bin/python3.13 repo/runtime/site-sources/nodejs_wheel/bin/node
+            want="x86-64"; [ "$arch" = arm ] && want="aarch64"
+            for elf in repo/runtime/python/bin/python3.13 repo/runtime/site-sources/nodejs_wheel/bin/node; do
+              file -b "$app_tmp/$elf" | grep -qi "$want" || { echo "ERROR: $elf 不是 $want" >&2; exit 1; }
+            done
+            rm -rf "$app_tmp"
+            python3 scripts/check_donate_assets.py "$fpk_file"
+            ( cd dist && sha256sum -c "$(basename "$fpk_file").sha256" )
           done
-          app_tmp="$(mktemp -d)"
-          trap 'rm -rf "$app_tmp"' EXIT
-          tar -xzf "$fpk_file" -C "$app_tmp" app.tgz
-          for path in ui/config ui/images/icon_64.png ui/images/icon_256.png \
-            config/privilege config/resource repo/proxy/llm_usage.py repo/FNMUSIC_COMPAT.json; do
-            tar -tzf "$app_tmp/app.tgz" | grep -qx "$path" || {
-              echo "ERROR: app.tgz 缺少 $path" >&2; exit 1; }
-          done
-          python3 scripts/check_donate_assets.py "$fpk_file"
-          ( cd dist && sha256sum -c "$(basename "$fpk_file").sha256" )
 
 
   production:

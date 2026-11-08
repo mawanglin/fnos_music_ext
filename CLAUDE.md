@@ -12,5 +12,12 @@
 ## 与上游的差异面（rebase 时重点看）
 `install.sh`/`extend.sh` 的部署形态解析、`packaging/fpk/**`（cmd、build.sh、manifest.in）、`proxy/version.py`（fork 通道）、`webui-service/app.py`（更新源、关于页）、`.github/workflows/{ci,release}.yml`、相关测试。Docker 代码在 install.sh/extend.sh 里仍保留为死代码，只为让与上游的 diff 最小。
 
+## 内置运行时（fpk 全集成，不碰系统）
+- fpk 按架构各出一个：`packaging/fpk/build.sh`（默认 x86 + arm），产物 `dist/fnmusic-ext-<版本>-<x86|arm>.fpk`。
+- 内置内容由 `packaging/fpk/fetch_runtime.py` 按 `packaging/fpk/runtime/runtime.json` + `requirements-{proxy,sources}.lock` 生成到包内 `app/repo/runtime/`：Python（python-build-standalone）、依赖 wheel（含 nodejs-wheel，Node 即取自其中）、ffmpeg 静态构建。所有下载校验 sha256，改版本必须同步改校验和。
+- 安装脚本以 `runtime/BUNDLED` 判断内置模式（`proxy/runtime_common.sh` 的 `fnmusic_bundled` / `bundled_make_venv`）：离线用内置 Python 建 venv 并挂载依赖目录，**绝不调用 apt / pip / 联网**。无标记（源码安装）保持上游行为。
+- 升级依赖：在 x86 上用内置 Python 新建 venv 装一遍，`pip freeze` 覆盖两个 `.lock`（去掉 pip 本身），再 `fetch_runtime.py` 验证 x86 与 arm 都能取到 wheel。只有源码包的依赖必须是纯 Python（否则构建中止）。
+- 仍用系统自带的 `/usr/bin/python3` 的只有 `takeover.py` 等只依赖标准库的辅助脚本（系统自带，不安装任何东西）。
+
 ## 测试
 `python3 scripts/run_tests.py`（全量，较慢）；打包相关：`python3 -m pytest packaging/tests`。

@@ -56,6 +56,7 @@ else
         FNMUSIC_SELECTED_FFPROBE="$(command -v ffprobe 2>/dev/null || true)"
         [ -n "${FNMUSIC_SELECTED_FFMPEG}" ]
     }
+    fnmusic_bundled() { return 1; }
     deps_requirements_digest() { sha256sum "$@" 2>/dev/null | awk '{print $1}' | sha256sum | awk '{print $1}'; }
     deps_state_valid() { return 1; }
     deps_write_state() { :; }
@@ -96,13 +97,22 @@ fi
 PYTHON_BIN="${FNMUSIC_SELECTED_PYTHON}"
 log_info "选用 Python: ${PYTHON_BIN} ($(runtime_python_version "${PYTHON_BIN}")，来源: ${FNMUSIC_PYTHON_SOURCE})"
 
-if [ ! -x "${VENV_DIR}/bin/python" ]; then
+if fnmusic_bundled; then
+    # 内置运行时：依赖随包预置，离线组装 venv；后面的 pip 安装整段跳过。
+    log_info "使用包内置运行时，离线准备音源环境 ${VENV_DIR} ..."
+    bundled_make_venv "${VENV_DIR}" sources || { log_err "内置运行时组装失败：${VENV_DIR}"; exit 1; }
+    SKIP_PIP_INSTALL=1
+    if ! "${VENV_DIR}/bin/python" -c 'import supervisor, musicdl, fastapi, uvicorn, httpx, curl_cffi, PIL, qrcode, multipart' 2>/dev/null; then
+        log_err "内置依赖校验失败（关键模块无法导入），安装包可能损坏，请重新下载安装。"
+        exit 1
+    fi
+elif [ ! -x "${VENV_DIR}/bin/python" ]; then
     log_info "创建虚拟环境 ${VENV_DIR} ..."
     "${PYTHON_BIN}" -m venv "${VENV_DIR}"
 fi
 VENV_PYTHON="${VENV_DIR}/bin/python"
 PIP_BIN="${VENV_DIR}/bin/pip"
-if [ ! -x "${VENV_PYTHON}" ] || [ ! -x "${PIP_BIN}" ]; then
+if [ ! -x "${VENV_PYTHON}" ] || { [ ! -x "${PIP_BIN}" ] && ! fnmusic_bundled; }; then
     log_err "虚拟环境异常：${VENV_PYTHON} 或 ${PIP_BIN} 不存在。"
     log_err "可删除 ${VENV_DIR} 后重跑本脚本重建。"
     exit 1
@@ -162,6 +172,8 @@ fi
 # ------------------------------------------------------- 2. nodejs / ffmpeg
 apt_install_missing() {
     # $@ = 系统包名列表；返回仍缺失的命令数
+    # 内置模式绝不调用 apt（避免改动系统导致后续系统升级出问题）
+    fnmusic_bundled && return 1
     local missing=() pkg cmd
     for pkg in "$@"; do
         if ! command -v "${pkg}" >/dev/null 2>&1; then
@@ -180,6 +192,7 @@ apt_install_missing() {
 }
 
 apt_install_packages() {
+    fnmusic_bundled && { log_err "内置运行时模式不调用 apt；包内组件缺失，请重新安装。"; return 1; }
     log_warn "尝试 sudo apt-get 安装/补齐: $*"
     if command -v apt-get >/dev/null 2>&1 && sudo apt-get update -o Acquire::Retries=1 2>/dev/null \
         && sudo apt-get install -y --no-install-recommends "$@"; then
@@ -281,7 +294,7 @@ else
     rm -rf "${LXSERVER_DIR}.tmp"
     mkdir -p "${LXSERVER_DIR}.tmp"
     # unzip 非必装组件：用 python 标准库解压（与 pip 依赖同源，不新增系统依赖）
-    python3 -m zipfile -e "${TARGET_ZIP}" "${LXSERVER_DIR}.tmp"
+    "${PYTHON_BIN}" -m zipfile -e "${TARGET_ZIP}" "${LXSERVER_DIR}.tmp"
     if [ -d "${LXSERVER_DIR}.tmp/lx-music-sync-server" ]; then
         rm -rf "${LXSERVER_DIR}"
         mv "${LXSERVER_DIR}.tmp/lx-music-sync-server" "${LXSERVER_DIR}"

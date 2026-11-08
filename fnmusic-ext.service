@@ -1,7 +1,7 @@
 # Canonical template; rendered by proxy/takeover.py render-unit.
 [Unit]
 Description=fnmusic-ext Proxy Service (Socket Takeover)
-After=network.target docker.service
+After=network.target
 
 [Service]
 Type=simple
