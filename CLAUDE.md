@@ -3,6 +3,7 @@
 本仓库 `origin` = `mawanglin/fnos_music_ext`（fork），`upstream` = `javycoder/fnos_music_ext`（官方，Docker + native 双形态）。
 
 ## 铁律
+- **作者信息一律用 `Cob`，不要用 `mawanglin`**：manifest 的 maintainer、关于页、README、提交的 author/committer（git config 已是 `Cob <Cob@88.com>`，提交时不要用 `-c user.name=` 覆盖）都写 Cob。仓库地址 `github.com/mawanglin/...` 是 GitHub 账号路径，无法改，仅作为 URL 保留。
 - 定制改动（fpk 去 Docker、只保留飞牛原生）只在 `native-only` 分支，**永远不合并进 `main`**。用户主动要求合并时也必须**二次确认**。
 - `main` 只用来同步上游：`git fetch upstream && git checkout main && git merge --ff-only upstream/main`（或 reset 到 upstream/main），然后把 `native-only` rebase / merge 到最新 `main` 上。
 - **永远不要向上游（javycoder）提 PR。**
