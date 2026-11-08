@@ -110,7 +110,7 @@ rsync -a --delete \
     --exclude='llm_usage.json' --exclude='llm_usage.json.*' \
     --exclude='playlist_tracks/' --exclude='album_registry.json' --exclude='bind_registry.json' \
     --exclude='*.fpk' \
-    --exclude='/docker-compose.yml' --exclude='/.dockerignore' --exclude='/ensure_base_image.sh' \
+    --exclude='/docker-compose.yml' --exclude='.dockerignore' --exclude='/ensure_base_image.sh' \
     --exclude='/container/Dockerfile' --exclude='/container/supervisord.conf' \
     "${REPO_ROOT}/" "${STAGE}/app/repo/"
 

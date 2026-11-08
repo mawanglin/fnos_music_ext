@@ -300,6 +300,8 @@ class TestPayload:
         for rel in ("docker-compose.yml", ".dockerignore", "ensure_base_image.sh",
                     "container/Dockerfile", "container/supervisord.conf"):
             assert not (repo / rel).exists(), f"payload 不应包含 Docker 文件 {rel}"
+        leftovers = [p for p in repo.rglob("*") if p.name in (".dockerignore", "Dockerfile")]
+        assert not leftovers, f"payload 不应包含任何 .dockerignore/Dockerfile: {leftovers}"
 
     def test_arm64_native_binding_is_embedded(self, stage: Path):
         repo = stage / "app" / "repo"
