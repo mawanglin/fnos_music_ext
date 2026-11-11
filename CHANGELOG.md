@@ -5,6 +5,14 @@
 
 ## [Unreleased]
 
+## [2.12.4-n2] - 2026-11-11
+
+基线仍为上游 `v2.12.4`，FPK 安装版本 `2.12.4-2`，tag / WebUI 显示 `v2.12.4-n2`，发布通道 `fork`。适配飞牛音乐 `1.0.10` 与 `1.1.19`。
+
+### 修复
+- 原生部署下 WebUI 保存配置、切换音源、拉起洛雪等一切需要启停音源进程的操作都失败，报「无法读取音源进程状态：No closing quotation」。原因是 supervisord 解析 `environment=` 时会剥掉值两端的引号字符，`WEBUI_SUPERVISORCTL="supervisorctl -c '<目录>/supervisord.conf'"` 结尾的单引号被一并剥掉，WebUI 拆分命令时引号不配对。现在渲染为 `-c '<目录>'/supervisord.conf`，路径含空格时同样正确。升级安装会重新生成该配置，无需手动处理。
+- 测试改为按 supervisord 的真实规则解析 `environment=`，不再自行截取引号，避免同类问题漏检。
+
 ## [2.12.4-n1] - 2026-11-11
 
 同步上游 `v2.12.4` 基线（`javycoder/fnos_music_ext`），FPK 安装版本 `2.12.4-1`，tag / WebUI 显示 `v2.12.4-n1`，发布通道 `fork`。适配飞牛音乐 `1.0.10` 与 `1.1.19`。

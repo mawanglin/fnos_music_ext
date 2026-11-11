@@ -466,9 +466,12 @@ for key, value in zip(("REPO", "VENV", "DATA", "RUN", "NODE", "NODE_BIN_DIR", "F
 text = text.replace("@SOURCES_PATH@", sources_path.replace("%", "%%"))
 
 if pathlib.Path(template).name == "supervisord-native.conf.in":
+    # 单引号只包住目录：-c '<RUN>'/supervisord.conf。supervisord 解析 environment=
+    # 时对值做 strip('\'"')，值若以 '" 结尾会连单引号一起剥掉，WebUI 的 shlex
+    # 就会报 No closing quotation；相邻的引号段 shlex 会拼回同一个参数。
     text = text.replace('WEBUI_SUPERVISORCTL="supervisorctl -c ',
                         'WEBUI_SUPERVISORCTL="supervisorctl -c \'')
-    text = text.replace('/supervisord.conf"', '/supervisord.conf\'"')
+    text = text.replace('/supervisord.conf"', '\'/supervisord.conf"')
 sys.stdout.write(text)
 PY
 }

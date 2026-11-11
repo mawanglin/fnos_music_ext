@@ -33,6 +33,29 @@ if BASH is None:
     pytest.skip("bash 不可用", allow_module_level=True)
 
 
+def _supervisor_environment(value: str) -> dict[str, str]:
+    """按 supervisord 的真实规则解析 environment=，测试取值不能自己截引号。
+
+    supervisor 对每个值做 `.strip('\\'"')`：值以 `'"` 结尾时两个引号都会被剥掉，
+    开头却只剥掉 `"`，留下不配对的单引号（WebUI shlex 报 No closing quotation）。
+    装了 supervisor 就直接用它的实现，否则用与 4.3.0 等价的副本。
+    """
+    try:
+        from supervisor.datatypes import dict_of_key_value_pairs
+    except ImportError:
+        def dict_of_key_value_pairs(arg):
+            lexer = shlex.shlex(str(arg))
+            lexer.wordchars += '/.+-():'
+            tokens = list(lexer)
+            result = {}
+            for i in range(0, len(tokens), 4):
+                key, eq, val = tokens[i:i + 3]
+                assert eq == "="
+                result[key] = val.strip('\'"')
+            return result
+    return dict_of_key_value_pairs(value)
+
+
 def _load_module(rel: str, name: str):
     path = BASE / rel
     # lxmusic app 顶层 from lxserver_client import ...：加载期需 service 目录在 sys.path，
@@ -272,7 +295,7 @@ def test_render_native_supervisor_conf_placeholders(tmp_path):
     assert f"directory={tmp_path}/musicdl-service" in out
     assert f"{tmp_path}/.venv-sources/bin/uvicorn" in out
     assert f"directory={tmp_path}/.lxserver" in out
-    assert f"WEBUI_SUPERVISORCTL=\"supervisorctl -c '{tmp_path}/sources-native/supervisord.conf'\"" in out
+    assert f"WEBUI_SUPERVISORCTL=\"supervisorctl -c '{tmp_path}/sources-native'/supervisord.conf\"" in out
     # 渲染产物落在 sources-native/ 下
     assert (tmp_path / "sources-native" / "supervisord.conf").is_file()
 
@@ -463,7 +486,8 @@ def test_native_render_special_paths_and_webui_command(tmp_path, monkeypatch, na
     assert conf["program:musicdl"]["directory"] == str(repo / "musicdl-service")
     assert shlex.split(conf["program:musicdl"]["command"])[0] == str(repo / ".venv-sources/bin/uvicorn")
     env = conf["program:webui"]["environment"]
-    ctl = env.split('WEBUI_SUPERVISORCTL="', 1)[1].rsplit('"', 1)[0]
+    # supervisord 会先把 %% 还原为 %，再解析 key=value 对
+    ctl = _supervisor_environment(env.replace("%%", "%"))["WEBUI_SUPERVISORCTL"]
     bindir = tmp_path / "bin"
     bindir.mkdir()
     stub = bindir / "supervisorctl"
