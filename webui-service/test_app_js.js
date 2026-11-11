@@ -3212,6 +3212,84 @@ test("保存：目录检查立即禁用按钮，重复点击不会发起第二�
   }
 });
 
+test("洛雪源列表：编辑名称只改显示名，不触发重新激活", async () => {
+  reset();
+  const items = [{ name: "甲", url: "https://s/a.js", active: true, id: "甲.js" }];
+  enqueue("/app/fnmusic-ext/api/config", { values: {
+    LX_SOURCE_LIST: JSON.stringify(items), FNMUSIC_LX_SOURCE_ORDER: JSON.stringify(["甲.js"]) } });
+  await global.loadConfig();
+  global.editLxSource(0);
+  let html = els.get("#lx-source-list").innerHTML;
+  assert.ok(html.includes('id="lx-edit-name"') && html.includes('id="lx-edit-url"'));
+  assert.ok(html.includes('value="https://s/a.js"'));
+  assert.strictEqual(global.applyLxSourceEdit(0, "  新名字 ", "https://s/a.js"), true);
+  const [item] = JSON.parse(vm.runInThisContext("JSON.stringify(lxSourceList)"));
+  assert.deepStrictEqual(item, { name: "新名字", url: "https://s/a.js", active: true, id: "甲.js" });
+  assert.deepStrictEqual(JSON.parse(vm.runInThisContext("JSON.stringify(lxSourceOrder)")), ["甲.js"]);
+  assert.strictEqual(vm.runInThisContext("dirty && lxSourceListDirty"), true);
+  html = els.get("#lx-source-list").innerHTML;
+  assert.ok(!html.includes('id="lx-edit-url"'), "确定后退出编辑态");
+  assert.ok(html.includes("新名字") && html.includes("已配置启用"));
+});
+
+test("洛雪源列表：编辑地址清掉旧源 id 与排序，保存时按新地址重新激活", async () => {
+  reset();
+  const items = [
+    { name: "六音", url: "https://raw/sixyin.js", active: true, id: "六音音源.js" },
+    { name: "其他", url: "https://raw/other.js", active: false },
+  ];
+  enqueue("/app/fnmusic-ext/api/config", { values: {
+    LX_SOURCE_LIST: JSON.stringify(items), FNMUSIC_LX_SOURCE_ORDER: JSON.stringify(["六音音源.js"]) } });
+  await global.loadConfig();
+  global.editLxSource(0);
+  assert.strictEqual(global.applyLxSourceEdit(0, "", "https://ghproxy.net/raw/sixyin.js"), true);
+  const [item] = JSON.parse(vm.runInThisContext("JSON.stringify(lxSourceList)"));
+  assert.deepStrictEqual(item, { name: "sixyin.js", url: "https://ghproxy.net/raw/sixyin.js", active: true });
+  assert.deepStrictEqual(JSON.parse(vm.runInThisContext("JSON.stringify(lxSourceOrder)")), []);
+  assert.ok(els.get("#lx-source-list").innerHTML.includes("待保存激活"));
+  assert.strictEqual(vm.runInThisContext("lxPendingActivationCount()"), 1);
+});
+
+test("洛雪源列表：编辑拒绝空地址与重复地址，保持编辑态与原数据", async () => {
+  reset();
+  const items = [
+    { name: "甲", url: "https://s/a.js", active: false },
+    { name: "乙", url: "https://s/b.js", active: false },
+  ];
+  enqueue("/app/fnmusic-ext/api/config", { values: { LX_SOURCE_LIST: JSON.stringify(items) } });
+  await global.loadConfig();
+  const before = vm.runInThisContext("JSON.stringify(lxSourceList)");
+  global.editLxSource(0);
+  assert.strictEqual(global.applyLxSourceEdit(0, "甲", "   "), false);
+  assert.strictEqual(global.applyLxSourceEdit(0, "甲", "https://s/b.js"), false);
+  assert.strictEqual(vm.runInThisContext("JSON.stringify(lxSourceList)"), before);
+  assert.strictEqual(vm.runInThisContext("lxSourceListDirty"), false);
+  assert.strictEqual(vm.runInThisContext("lxEditingIdx"), 0);
+  global.cancelLxSourceEdit();
+  assert.strictEqual(vm.runInThisContext("lxEditingIdx"), -1);
+  assert.ok(!els.get("#lx-source-list").innerHTML.includes('id="lx-edit-url"'));
+});
+
+test("洛雪源列表：编辑期间状态轮询不重绘，避免冲掉正在输入的内容", async () => {
+  reset();
+  const items = [{ name: "甲", url: "https://s/a.js", active: true }];
+  enqueue("/app/fnmusic-ext/api/config", { values: { LX_SOURCE_LIST: JSON.stringify(items) } });
+  await global.loadConfig();
+  global.editLxSource(0);
+  const editing = els.get("#lx-source-list").innerHTML;
+  enqueue("/app/fnmusic-ext/api/status", {
+    version: "t", current_provider: "lxmusic", processes: {}, services: {},
+    lx_source: { state: "ready", sources: [{ url: "https://s/a.js", status: "success" }] },
+  });
+  await global.loadStatus();
+  assert.strictEqual(els.get("#lx-source-list").innerHTML, editing);
+  enqueue("/app/fnmusic-ext/api/status", new Error("服务暂不可用"));
+  await global.loadStatus();
+  assert.strictEqual(els.get("#lx-source-list").innerHTML, editing);
+  global.cancelLxSourceEdit();
+  assert.ok(els.get("#lx-source-list").innerHTML.includes("运行状态未知"));
+});
+
 /* ------------------------------------------------ 运行 --------------------- */
 (async () => {
   let failed = 0;

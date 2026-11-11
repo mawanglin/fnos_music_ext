@@ -38,6 +38,7 @@ const DOWNLOAD_LAYOUT_LABELS = {
 let qrTimer = null;
 let lxVerifiedUrl = null; // 已通过测试的 lx URL（保存时免二次校验提示用）
 let lxSourceList = [];    // 本地待保存配置；运行状态轮询不可覆盖 active
+let lxEditingIdx = -1;    // 正在原位编辑的列表项；编辑期间状态轮询不重绘列表
 let lxSourceOrder = [];   // 洛雪稳定源 ID 顺序；停用时保留历史位置
 let lxRuntimeSnapshot = null; // /api/status 的只读运行快照
 const LX_STATE_LABEL = { unconfigured: "未配置", loading: "初始化中", ready: "可用", degraded: "部分可用", failed: "全部失败", unavailable: "服务不可用" };
@@ -551,7 +552,7 @@ async function loadStatus(timeoutMs = 0) {
     }).join("");
     lxRuntimeSnapshot = st.lx_source || null;
     syncLxSourceOrder();
-    renderLxSourceList(); // 只同步运行徽标，不重载配置或丢弃尚未保存的编辑。
+    renderLxSourceList({ fromStatus: true }); // 只同步运行徽标，不重载配置或丢弃尚未保存的编辑。
     renderLxSourceOrder();
     const lxCard = $("#ov-lx-card");
     if (st.current_provider === "lxmusic" && st.lx_source) {
@@ -585,7 +586,7 @@ async function loadStatus(timeoutMs = 0) {
   } catch (exc) {
     // 旧快照不能无限期显示绿色“运行就绪”；保留用户尚未保存的编辑。
     lxRuntimeSnapshot = null;
-    renderLxSourceList();
+    renderLxSourceList({ fromStatus: true });
     $("#ov-provider-body").textContent = "状态加载失败：" + exc.message;
     $("#ov-processes").innerHTML = '<span class="chip"><span class="dot"></span>进程状态未知（获取失败）</span>';
     $("#ov-services").innerHTML = '<span class="state-line"><span class="dot"></span>服务状态未知（获取失败）</span>';
@@ -701,6 +702,7 @@ function applyConfigToForm() {
   $("#lx-url-timeout").value = v.LX_URL_TIMEOUT || "15.0";
   $("#lx-probe-timeout").value = v.LX_PROBE_TIMEOUT || "3.0";
   lxSourceListDirty = false;
+  lxEditingIdx = -1;
   try {
     const rawList = v.LX_SOURCE_LIST;
     lxSourceList = rawList ? JSON.parse(rawList) : [];
@@ -2367,9 +2369,12 @@ function renderLxSourceOrder() {
   });
 }
 
-function renderLxSourceList() {
+function renderLxSourceList({ fromStatus = false } = {}) {
   const container = $("#lx-source-list");
   if (!container) return;
+  // 编辑中整列表重绘会冲掉输入框里尚未确定的内容与焦点；退出编辑时再补刷徽标。
+  if (fromStatus && lxEditingIdx >= 0) return;
+  if (lxEditingIdx >= lxSourceList.length) lxEditingIdx = -1;
 
   if (!lxSourceList.length) {
     container.innerHTML = `<span class="muted pad">暂无洛雪音乐源，上传 .js 或填写脚本地址后点击「添加」加入列表</span>`;
@@ -2390,10 +2395,27 @@ function renderLxSourceList() {
     const runtimeError = runtime?.error || "";
     const displayName = escapeHtml(item.name || lxDefaultName(item.url));
     const safeUrl = escapeHtml(item.url);
+    if (idx === lxEditingIdx) {
+      return `
+      <div class="lx-item editing${isActive ? " on" : ""}">
+        <div class="lx-item-main lx-edit">
+          <input class="input" id="lx-edit-name" value="${escapeHtml(item.name || "")}" placeholder="名称（留空则用文件名）" aria-label="洛雪源名称">
+          <input class="input" id="lx-edit-url" value="${safeUrl}" placeholder="https://example.com/lx-source.js 或 file:///…" aria-label="洛雪源地址">
+          ${isActive ? `<span class="muted">改了地址的话，保存时会停用原地址并从新地址重新激活</span>` : ""}
+        </div>
+        <div class="lx-item-btns">
+          <button class="btn small primary lx-btn-edit-ok" data-idx="${idx}">确定</button>
+          <button class="btn small lx-btn-edit-cancel" data-idx="${idx}">取消</button>
+        </div>
+      </div>`;
+    }
+    const editBtn = `<button class="btn small lx-btn-edit" data-idx="${idx}">编辑</button>`;
     const btns = isActive
       ? `<button class="btn small lx-btn-deactivate" data-idx="${idx}">取消激活</button>
+         ${editBtn}
          <button class="btn small danger lx-btn-del" data-idx="${idx}">删除</button>`
       : `<button class="btn small lx-btn-activate" data-idx="${idx}">激活</button>
+         ${editBtn}
          <button class="btn small danger lx-btn-del" data-idx="${idx}">删除</button>`;
     return `
       <div class="lx-item${isActive ? " on" : ""}">
@@ -2419,11 +2441,87 @@ function renderLxSourceList() {
   container.querySelectorAll(".lx-btn-del").forEach((btn) => {
     btn.addEventListener("click", () => deleteLxSource(parseInt(btn.dataset.idx, 10)));
   });
+  container.querySelectorAll(".lx-btn-edit").forEach((btn) => {
+    btn.addEventListener("click", () => editLxSource(parseInt(btn.dataset.idx, 10)));
+  });
+  container.querySelectorAll(".lx-btn-edit-ok").forEach((btn) => {
+    btn.addEventListener("click", () => applyLxSourceEdit(parseInt(btn.dataset.idx, 10),
+      $("#lx-edit-name")?.value || "", $("#lx-edit-url")?.value || ""));
+  });
+  container.querySelectorAll(".lx-btn-edit-cancel").forEach((btn) => {
+    btn.addEventListener("click", () => cancelLxSourceEdit());
+  });
+  if (lxEditingIdx >= 0) {
+    container.querySelectorAll("#lx-edit-name, #lx-edit-url").forEach((input) => {
+      input.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter") {
+          ev.preventDefault();
+          applyLxSourceEdit(lxEditingIdx, $("#lx-edit-name")?.value || "", $("#lx-edit-url")?.value || "");
+        } else if (ev.key === "Escape") {
+          cancelLxSourceEdit();
+        }
+      });
+    });
+    $("#lx-edit-url")?.focus?.();
+  }
+}
+
+function editLxSource(idx) {
+  if (!lxSourceList[idx]) return;
+  lxEditingIdx = idx;
+  renderLxSourceList();
+}
+
+function cancelLxSourceEdit() {
+  lxEditingIdx = -1;
+  renderLxSourceList();
+}
+
+// 原位编辑名称与地址。只改名称不影响运行；改地址等同“换一个源”：清掉旧源 id 与
+// 排序身份，激活项保存时由后端先停用原地址、再从新地址激活（同一脚本换镜像地址时，
+// lxmusic 会替换已停用的同名旧源）。
+function applyLxSourceEdit(idx, rawName, rawUrl) {
+  const item = lxSourceList[idx];
+  if (!item) return false;
+  const url = String(rawUrl || "").trim();
+  if (!url) {
+    toast("地址不能为空", "fail");
+    return false;
+  }
+  if (lxSourceList.some((other, i) => i !== idx && other && other.url === url)) {
+    toast("列表里已有相同地址的源", "fail");
+    return false;
+  }
+  const name = String(rawName || "").trim() || lxDefaultName(url);
+  const urlChanged = url !== item.url;
+  const nameChanged = name !== (item.name || "");
+  lxEditingIdx = -1;
+  if (urlChanged) {
+    const oldId = lxStableSourceId(item);
+    if (oldId) lxSourceOrder = lxSourceOrder.filter((id) => id !== oldId);
+    delete item.id;
+    delete item.source_id;
+    item.url = url;
+  }
+  if (nameChanged) item.name = name;
+  if (urlChanged || nameChanged) {
+    lxSourceListDirty = true;
+    markDirty(urlChanged && item.active
+      ? "洛雪源地址已修改，保存时停用原地址并从新地址激活"
+      : "洛雪源列表已修改，需保存后生效");
+    toast(urlChanged && item.active
+      ? `已修改「${name}」的地址，保存后从新地址激活`
+      : `已修改「${name}」，保存后生效`, "ok");
+  }
+  renderLxSourceList();
+  renderLxSourceOrder();
+  return true;
 }
 
 function activateLxSource(idx) {
   const item = lxSourceList[idx];
   if (!item || item.active) return;
+  lxEditingIdx = -1;
   item.active = true;
   lxSourceListDirty = true;
   syncLxSourceOrder();
@@ -2436,6 +2534,7 @@ function activateLxSource(idx) {
 function deactivateLxSource(idx) {
   const item = lxSourceList[idx];
   if (!item || !item.active) return;
+  lxEditingIdx = -1;
   item.active = false;
   lxSourceListDirty = true;
   renderLxSourceList();
@@ -2447,6 +2546,7 @@ function deactivateLxSource(idx) {
 function deleteLxSource(idx) {
   const item = lxSourceList[idx];
   if (!item) return;
+  lxEditingIdx = -1;
   const name = item.name || lxDefaultName(item.url);
   const sourceId = lxStableSourceId(item);
   lxSourceList.splice(idx, 1);
