@@ -2878,6 +2878,44 @@ def _duplicate_script_response(url: str, name: str, existing: dict | None) -> JS
     })
 
 
+async def _replace_disabled_source(existing: dict, url: str) -> str | JSONResponse:
+    """删除停用的同名旧源并从新地址导入；新地址失败时从原地址导回旧源。"""
+    old_id = str(existing["id"])
+    name = str(existing.get("name") or old_id)
+    old_url = str(existing.get("sourceUrl") or "")
+    logger.info("同名洛雪源「%s」已停用，换为新地址: %s -> %s", name, old_url or "-", url)
+    await LXSERVER.delete_custom_source(old_id)
+    try:
+        res = await LXSERVER.import_custom_source(url)
+        new_id = str(res.get("id") or "")
+        if not new_id:
+            found = await _find_lxserver_source(by_url=url)
+            new_id = str((found or {}).get("id") or "")
+        if not new_id:
+            raise RuntimeError("导入后未找到新源")
+        return new_id
+    except Exception as exc:
+        if is_lxserver_unreachable(exc):
+            raise
+        restored = False
+        if old_url:
+            try:
+                await LXSERVER.import_custom_source(
+                    old_url, allow_unsafe_vm=bool(existing.get("allowUnsafeVM")))
+                restored = True
+            except Exception as restore_exc:  # noqa: BLE001
+                logger.warning("恢复洛雪源「%s」失败: %s", name, redact(str(restore_exc)))
+        if isinstance(exc, UnsafeVmRequired) and restored:
+            return _unsafe_vm_response(exc)
+        detail = redact(str(exc)).strip() or type(exc).__name__
+        tail = (f"已恢复原有源「{name}」（停用状态）" if restored
+                else f"原有源「{name}」已删除且未能恢复，请重新添加原地址: {old_url or '未知'}")
+        return JSONResponse(status_code=500, content={
+            "ok": False, "category": "download",
+            "error": f"从新地址导入「{name}」失败（{detail}）；{tail}",
+        })
+
+
 @app.post("/api/v1/source")
 @serialize_source_operation
 async def source_set(body: SourceBody):
@@ -2961,10 +2999,19 @@ async def _source_set(body: SourceBody):
                     source_id = str((existing or {}).get("id") or "")
                 if not source_id and duplicate_name:
                     # lxserver 按脚本 @name 判重：同一脚本换了地址（如加镜像前缀）
-                    # 会被拒绝导入，已有源仍以原地址登记。不代为激活已有源，
-                    # 以免两个列表条目共用一个源、停用其一时连带另一个。
-                    return _duplicate_script_response(url, duplicate_name,
-                                                      await _find_lxserver_source(by_name=duplicate_name))
+                    # 会被拒绝导入，已有源仍以原地址登记。
+                    duplicate = await _find_lxserver_source(by_name=duplicate_name)
+                    if duplicate and duplicate.get("id") and duplicate.get("enabled") is False:
+                        # WebUI 删除条目只停用、不删除 lxserver 里的源；停用的旧源
+                        # 没有激活条目在用，换成新地址，否则用户无从解除判重。
+                        replaced = await _replace_disabled_source(duplicate, url)
+                        if isinstance(replaced, JSONResponse):
+                            return replaced
+                        source_id = replaced
+                    else:
+                        # 已有源正在使用：不代为激活，以免两个列表条目共用一个源、
+                        # 停用其一时连带另一个。
+                        return _duplicate_script_response(url, duplicate_name, duplicate)
                 if not source_id or not await LXSERVER.set_source_enabled(source_id, True):
                     return JSONResponse(
                         content={

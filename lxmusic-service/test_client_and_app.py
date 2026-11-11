@@ -2479,3 +2479,57 @@ def test_source_set_reports_same_script_imported_from_other_url(test_app_client,
     assert body["duplicate_of"] == {"id": "六音音源.js", "name": "六音音源", "url": raw}
     assert not fake_lx.toggle_calls
     assert fake_lx.sources[0]["enabled"] is True
+
+
+def _name_dedup_import(fake_lx, name, *, fail_urls=()):
+    """模拟 lxserver：按脚本 @name 判重，id 取自脚本名而非 URL。"""
+    calls = []
+
+    async def import_by_name(url, **kwargs):
+        calls.append(url)
+        if any(s["name"] == name for s in fake_lx.sources):
+            raise RuntimeError(f'源 "{name}" 已存在于 [open]')
+        if url in fail_urls:  # 只模拟旧源删除后那次导入失败
+            raise RuntimeError("下载脚本失败: 404")
+        fake_lx.sources.append({"id": f"{name}.js", "name": name, "enabled": False,
+                                "version": "v1.2.1", "sourceUrl": url,
+                                "supportedSources": ["kw", "wy"]})
+        return {"success": True, "id": f"{name}.js", "metadata": {"name": name}}
+
+    fake_lx.import_custom_source = import_by_name
+    return calls
+
+
+def test_source_set_replaces_disabled_same_script_from_other_url(test_app_client, fake_lx):
+    """WebUI 删除条目只停用 lxserver 里的源；之后换地址重新添加同一脚本，
+    停用的旧源无人使用，应被替换为新地址并激活，而不是永远卡在“已存在”。"""
+    raw = "https://raw.githubusercontent.com/pdone/lx-music-source/main/sixyin/latest.js"
+    mirror = "https://ghproxy.net/" + raw.removeprefix("https://")
+    fake_lx.sources.append({"id": "六音音源.js", "name": "六音音源", "enabled": False,
+                            "version": "v1.2.1", "sourceUrl": raw,
+                            "supportedSources": ["kw", "wy"]})
+    calls = _name_dedup_import(fake_lx, "六音音源")
+    res = test_app_client.post("/api/v1/source", json={"url": mirror})
+    assert res.status_code == 200, res.text
+    assert res.json()["ok"] is True
+    assert fake_lx.deleted_ids == ["六音音源.js"]
+    assert calls == [mirror, mirror]
+    [only] = [s for s in fake_lx.sources if s["name"] == "六音音源"]
+    assert only["sourceUrl"] == mirror and only["enabled"] is True
+
+
+def test_source_set_restores_disabled_source_when_new_url_fails(test_app_client, fake_lx):
+    """替换时新地址导入失败：从原地址导回旧源，不能把用户的源弄丢。"""
+    raw = "https://raw.githubusercontent.com/pdone/lx-music-source/main/sixyin/latest.js"
+    mirror = "https://ghproxy.net/" + raw.removeprefix("https://")
+    fake_lx.sources.append({"id": "六音音源.js", "name": "六音音源", "enabled": False,
+                            "version": "v1.2.1", "sourceUrl": raw,
+                            "supportedSources": ["kw", "wy"]})
+    calls = _name_dedup_import(fake_lx, "六音音源", fail_urls=(mirror,))
+    res = test_app_client.post("/api/v1/source", json={"url": mirror})
+    assert res.status_code >= 400, res.text
+    assert res.json()["ok"] is False
+    assert calls == [mirror, mirror, raw]
+    [only] = [s for s in fake_lx.sources if s["name"] == "六音音源"]
+    assert only["sourceUrl"] == raw and only["enabled"] is False
+    assert not fake_lx.toggle_calls
