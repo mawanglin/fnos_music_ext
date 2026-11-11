@@ -2860,6 +2860,24 @@ async def source_upload(body: UploadBody):
     }
 
 
+# lxserver customSourceHandlers: `源 "${displayName}" 已存在于 [${owner}]`
+_LX_DUPLICATE_NAME_RE = re.compile(r'源 "(.+?)" 已存在')
+
+
+def _duplicate_script_response(url: str, name: str, existing: dict | None) -> JSONResponse:
+    """同名脚本已以其他地址导入：明确指出与哪个已有源重复，不改动任何源。"""
+    existing = existing or {}
+    shown = str(existing.get("name") or name)
+    existing_url = str(existing.get("sourceUrl") or "")
+    where = f"（已有源的导入地址：{existing_url}）" if existing_url else ""
+    error = (f"该地址下载到的脚本与已有洛雪源「{shown}」是同一个脚本{where}，"
+             f"洛雪按脚本名去重，不能重复导入；请直接使用「{shown}」，或删除本条: {url}")
+    return JSONResponse(status_code=409, content={
+        "ok": False, "error": error, "category": "runtime",
+        "duplicate_of": {"id": str(existing.get("id") or ""), "name": shown, "url": existing_url},
+    })
+
+
 @app.post("/api/v1/source")
 @serialize_source_operation
 async def source_set(body: SourceBody):
@@ -2922,6 +2940,7 @@ async def _source_set(body: SourceBody):
                 existing = await _find_lxserver_source(by_url=url)
                 if existing:
                     source_id = str(existing.get("id") or "")
+                duplicate_name = ""
                 if not source_id:
                     # 外部下载由 lxserver 执行；此处 HTTP 异常仅来自内部通信。
                     try:
@@ -2934,9 +2953,18 @@ async def _source_set(body: SourceBody):
                             raise
                         existing = await _find_lxserver_source(by_url=url)
                         source_id = str((existing or {}).get("id") or "")
+                        if not source_id:
+                            match = _LX_DUPLICATE_NAME_RE.search(str(exc))
+                            duplicate_name = match.group(1) if match else ""
                 if not source_id:
                     existing = await _find_lxserver_source(by_url=url)
                     source_id = str((existing or {}).get("id") or "")
+                if not source_id and duplicate_name:
+                    # lxserver 按脚本 @name 判重：同一脚本换了地址（如加镜像前缀）
+                    # 会被拒绝导入，已有源仍以原地址登记。不代为激活已有源，
+                    # 以免两个列表条目共用一个源、停用其一时连带另一个。
+                    return _duplicate_script_response(url, duplicate_name,
+                                                      await _find_lxserver_source(by_name=duplicate_name))
                 if not source_id or not await LXSERVER.set_source_enabled(source_id, True):
                     return JSONResponse(
                         content={

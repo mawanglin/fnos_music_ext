@@ -2451,3 +2451,31 @@ def test_track_url_endpoint_uses_hot_reloaded_timeouts(test_app_client, fake_lx,
         assert fake_lx.url_timeouts[-1] == 11.5
     finally:
         restore()
+
+
+def test_source_set_reports_same_script_imported_from_other_url(test_app_client, fake_lx):
+    """同一脚本换了地址（如加 ghproxy 前缀）再激活：lxserver 按脚本名判重拒绝导入。
+
+    不能报“导入成功但未找到要激活的源”，要指出与哪个已有源重复、已有源的地址，
+    且不得改动已有源的启用态。
+    """
+    raw = "https://raw.githubusercontent.com/pdone/lx-music-source/main/sixyin/latest.js"
+    mirror = "https://ghproxy.net/" + raw.removeprefix("https://")
+    fake_lx.sources.append({"id": "六音音源.js", "name": "六音音源", "enabled": True,
+                            "version": "v1.2.1", "sourceUrl": raw,
+                            "supportedSources": ["kw", "wy"]})
+
+    async def duplicate(url, **kwargs):
+        raise RuntimeError('源 "六音音源" 已存在于 [open]')
+
+    fake_lx.import_custom_source = duplicate
+    res = test_app_client.post("/api/v1/source", json={"url": mirror})
+    assert res.status_code == 409, res.text
+    body = res.json()
+    assert body["ok"] is False
+    assert body["category"] == "runtime"  # WebUI 据此保留原激活配置
+    assert "导入成功" not in body["error"]
+    assert "「六音音源」" in body["error"] and raw in body["error"]
+    assert body["duplicate_of"] == {"id": "六音音源.js", "name": "六音音源", "url": raw}
+    assert not fake_lx.toggle_calls
+    assert fake_lx.sources[0]["enabled"] is True
