@@ -324,6 +324,21 @@ if [ -f "${LXSERVER_DIR}/server/server/userApi.js" ]; then
         "${LXSERVER_DIR}/server/server/userApi.js"
 fi
 
+# 原生形态没有容器网络隔离：上游把监听地址写死为 0.0.0.0（BIND_IP 被注释掉，
+# 不生效），会把 lxserver 管理接口暴露到局域网。改为读取 BIND_IP（supervisord
+# 设为 127.0.0.1），未设置时保持上游行为。幂等：同版本在位也修复旧安装。
+LXSERVER_MAIN="${LXSERVER_DIR}/server/index.js"
+LXSERVER_LISTEN_ORIG="startServer(global.lx.config.port, '0.0.0.0');"
+LXSERVER_LISTEN_BIND="startServer(global.lx.config.port, process.env.BIND_IP || '0.0.0.0');"
+if [ -f "${LXSERVER_MAIN}" ] && ! grep -qF "${LXSERVER_LISTEN_BIND}" "${LXSERVER_MAIN}"; then
+    if grep -qF "${LXSERVER_LISTEN_ORIG}" "${LXSERVER_MAIN}"; then
+        sed -i "s/startServer(global\.lx\.config\.port, '0\.0\.0\.0');/${LXSERVER_LISTEN_BIND}/" "${LXSERVER_MAIN}"
+        log_info "lxserver 监听地址改为读取 BIND_IP（仅回环）。"
+    else
+        log_warn "lxserver 入口未找到预期的监听语句，未能限制为回环地址（lxserver 版本可能已变化）。"
+    fi
+fi
+
 bash "${BASE_DIR}/container/ensure_lxserver_native.sh" \
     --artifact-dir "${LXSERVER_ARTIFACT_DIR}" \
     --lxserver-dir "${LXSERVER_DIR}" \

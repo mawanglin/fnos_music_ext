@@ -15,7 +15,7 @@ logfile_maxbytes=0
 pidfile=@RUN@/supervisord.pid
 ; 全部子进程的公共环境：PATH 前置 venv（uvicorn/supervisorctl/musicbox CLI）、
 ; 数据目录对齐容器卷映射（sources-data = 容器 /data，仓库 = 容器 /repo）
-environment=PATH="@SOURCES_PATH@",PYTHONUNBUFFERED="1",FNMUSIC_ENV_FILE="@REPO@/.env",XDG_DATA_HOME="@DATA@",XDG_CACHE_HOME="@DATA@/cache",XDG_CONFIG_HOME="@DATA@/config",LX_DATA_DIR="@DATA@/lxmusic",LXSERVER_DATA_DIR="@DATA@/lxserver",FNMUSIC_FFMPEG_BIN="@FFMPEG@",FNMUSIC_FFPROBE_BIN="@FFPROBE@"
+environment=PATH="@SOURCES_PATH@",PYTHONUNBUFFERED="1",FNMUSIC_ENV_FILE="@REPO@/.env",XDG_DATA_HOME="@DATA@",XDG_CACHE_HOME="@DATA@/cache",XDG_CONFIG_HOME="@DATA@/config",LX_DATA_DIR="@DATA@/lxmusic",LXSERVER_DATA_DIR="@DATA@/lxserver",LXSERVER_URL="http://127.0.0.1:18005",FNMUSIC_FFMPEG_BIN="@FFMPEG@",FNMUSIC_FFPROBE_BIN="@FFPROBE@"
 
 [unix_http_server]
 file=@RUN@/supervisor.sock
@@ -71,7 +71,10 @@ stdout_logfile=@REPO@/logs/lxserver.log
 stdout_logfile_maxbytes=10MB
 stdout_logfile_backups=3
 redirect_stderr=true
-environment=DATA_PATH="@DATA@/lxserver",CONFIG_PATH="@DATA@/lxserver/config.js",PORT="8005",BIND_IP="127.0.0.1"
+; 原生形态与宿主机共用网络：8005 被飞牛影视 trim-media 占用（0.0.0.0:8005），
+; lxserver 改用 18005，lxmusic 经全局 LXSERVER_URL 对齐；BIND_IP 由
+; ensure_sources_native.sh 的补丁生效（上游把监听地址写死为 0.0.0.0）。
+environment=DATA_PATH="@DATA@/lxserver",CONFIG_PATH="@DATA@/lxserver/config.js",PORT="18005",BIND_IP="127.0.0.1"
 
 [program:lxmusic]
 directory=@REPO@/lxmusic-service

@@ -164,9 +164,14 @@ def test_native_supervisor_template_programs_and_ports():
     text = (BASE / "container" / "supervisord-native.conf.in").read_text(encoding="utf-8")
     for program in ("musicdl", "musicbox", "lxserver", "lxmusic", "webui"):
         assert f"[program:{program}]" in text
-    # 与容器发布端口一致（proxy 契约不变）；lxserver 保持回环 8005
-    for port in ("8768", "8770", "8772", "8774", "8005"):
+    # 与容器发布端口一致（proxy 契约不变）
+    for port in ("8768", "8770", "8772", "8774"):
         assert port in text
+    # 原生与宿主机共用网络，8005 被飞牛影视 trim-media 占用：lxserver 用 18005，
+    # lxmusic 经全局 LXSERVER_URL 对齐，两处端口必须一致。
+    assert 'PORT="8005"' not in text
+    assert 'PORT="18005",BIND_IP="127.0.0.1"' in text
+    assert 'LXSERVER_URL="http://127.0.0.1:18005"' in text
     assert "autostart=false" in text
     assert "FNMUSIC_ENV_FILE=\"@REPO@/.env\"" in text
     assert "WEBUI_SUPERVISORCTL=" in text
@@ -589,3 +594,27 @@ def test_native_unit_log_dir_matches_supervisor_lxserver_logfile():
     sup = (BASE / "container" / "supervisord-native.conf.in").read_text(encoding="utf-8")
     assert 'Environment="FNMUSIC_LOG_DIR=@REPO@/logs"' in unit
     assert "stdout_logfile=@REPO@/logs/lxserver.log" in sup
+
+
+def test_ensure_sources_native_patches_lxserver_bind(tmp_path):
+    """上游把监听地址写死为 0.0.0.0；原生形态须改为读取 BIND_IP，且幂等。"""
+    text = (BASE / "ensure_sources_native.sh").read_text(encoding="utf-8")
+    start = text.index('LXSERVER_MAIN="${LXSERVER_DIR}/server/index.js"')
+    end = text.index("\nfi\n", text.index("log_warn", start)) + len("\nfi\n")
+    snippet = text[start:end]
+    main = tmp_path / "server" / "index.js"
+    main.parent.mkdir()
+    main.write_text("const a = 1;\nstartServer(global.lx.config.port, '0.0.0.0');\n")
+    script = ('log_info() { echo "INFO $*"; }\nlog_warn() { echo "WARN $*"; }\n'
+              f'LXSERVER_DIR={shlex.quote(str(tmp_path))}\n' + snippet)
+    for _ in range(2):  # 第二次运行不得重复替换
+        r = run_bash(script)
+        assert r.returncode == 0, r.stderr
+        assert "WARN" not in r.stdout
+    assert main.read_text() == ("const a = 1;\nstartServer(global.lx.config.port, "
+                                "process.env.BIND_IP || '0.0.0.0');\n")
+    # 版本变化找不到语句：告警但不失败、不改文件
+    main.write_text("listen(port);\n")
+    r = run_bash(script)
+    assert r.returncode == 0 and "WARN" in r.stdout
+    assert main.read_text() == "listen(port);\n"

@@ -72,7 +72,7 @@ fi
 echo "--- 本机音源 HTTP 探活（各 3s 超时，供对照，不代表最终结论）"
 for url in "http://127.0.0.1:8768/healthz" "http://127.0.0.1:8770/healthz" \
            "http://127.0.0.1:8772/healthz" "http://127.0.0.1:8774/healthz" \
-           "http://127.0.0.1:8005/api/status"; do
+           "http://127.0.0.1:18005/api/status" "http://127.0.0.1:8005/api/status"; do
     code="$(curl -sS -o /dev/null -m 3 -w '%{http_code}' "${url}" 2>/dev/null || echo "FAIL")"
     echo "  ${url} -> ${code}"
 done
