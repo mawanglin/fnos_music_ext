@@ -18,6 +18,7 @@ import os
 import re
 import shlex
 import shutil
+import secrets
 import stat
 import subprocess
 import sys
@@ -84,7 +85,8 @@ ENV_PATH = Path(CONF["repo_dir"]) / ".env"
 
 MAINTENANCE_SOCKET = "/run/fnmusic-ext/maintenance.sock"
 
-async def _try_maintenance_socket(method: str, path: str, body: dict | None = None) -> dict | JSONResponse | None:
+async def _try_maintenance_socket(method: str, path: str, body: dict | None = None,
+                                 *, timeout: float = 35.0) -> dict | JSONResponse | None:
     """Try to call the host maintenance socket directly (for direct-mode access).
 
     Returns JSON on success, an error response preserving the host status,
@@ -94,7 +96,7 @@ async def _try_maintenance_socket(method: str, path: str, body: dict | None = No
         return None
     try:
         transport = httpx.AsyncHTTPTransport(uds=MAINTENANCE_SOCKET)
-        async with httpx.AsyncClient(transport=transport, base_url="http://unix", timeout=35.0) as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://unix", timeout=timeout) as client:
             if method == "GET":
                 resp = await client.get(path)
             else:
@@ -2441,10 +2443,15 @@ def _export_log_files(directory: Path):
     """关于页与导出共用清单：近 3 天的普通文件，不跟随符号链接。"""
     cutoff = time.time() - RETENTION_DAYS * 86400
     try:
+        if not stat.S_ISDIR(directory.lstat().st_mode):
+            return
         for item in sorted(directory.iterdir(), key=lambda p: p.name):
             try:
                 st = item.lstat()
-                if (stat.S_ISREG(st.st_mode) and item.suffix != ".logzip"
+                if (stat.S_ISREG(st.st_mode) and st.st_nlink == 1
+                        and item.suffix not in (".logzip", ".zip")
+                        and item.name not in ("log_collection.json", "proxy_diagnostics.json",
+                                              "export_env_snapshot.txt")
                         and st.st_mtime >= cutoff):
                     yield item, st
             except OSError:
@@ -2456,9 +2463,39 @@ def _export_log_files(directory: Path):
 def _log_files_info() -> "list[dict]":
     """可导出的日志文件清单（名称/大小/修改时间），不展示临时导出包。"""
     return [
-        {"name": item.name, "size": st.st_size, "mtime": int(st.st_mtime)}
-        for item, st in _export_log_files(log_dir())
+        {"name": prefix + item.name, "size": st.st_size, "mtime": int(st.st_mtime)}
+        for prefix, directory in _log_sources(log_dir())
+        for item, st in _export_log_files(directory)
+        if _include_log(prefix, item.name)
     ]
+
+
+def _log_sources(directory: Path) -> list[tuple[str, Path]]:
+    """Docker 已挂载仓库 /repo；读取宿主 logs，无需新挂载或放宽权限。"""
+    host = Path(CONF["repo_dir"]) / "logs"
+    sources = [("", directory)]
+    if os.path.normcase(os.path.abspath(host)) != os.path.normcase(os.path.abspath(directory)):
+        sources.append(("host/", host))
+    return sources
+
+
+def _include_log(prefix: str, name: str) -> bool:
+    # 宿主只收集固定诊断文件，不把仓库日志目录中的任意资料带出。
+    return not prefix or name == "env_snapshot.txt" or re.fullmatch(
+        r"(?:proxy|install)\.log(?:\.[0-9-]+(?:\.[0-9]{8})?)?", name) is not None
+
+
+async def _proxy_diagnostics() -> dict:
+    try:
+        result = await asyncio.wait_for(_try_maintenance_socket(
+            "GET", "/api/diagnostics/status", timeout=2.5), timeout=3.0)
+        if isinstance(result, dict) and result.get("ok") is True:
+            return {"status": "reachable", **result}
+        return {"status": "unavailable",
+                "reason": "host_error" if isinstance(result, JSONResponse) else "maintenance_socket_unavailable",
+                "note": "无法确认代理接管状态；不能仅据此认定代理未运行"}
+    except Exception as exc:
+        return {"status": "unavailable", "reason": type(exc).__name__}
 
 
 def _redact_chunk(raw: bytes) -> bytes:
@@ -2504,26 +2541,61 @@ def _copy_redacted(source, member, *, limit_bytes: int = 32 * 1024 * 1024) -> No
 
 def _write_log_archive(directory: Path, target: Path) -> None:
     """在线程池中执行日志读取、压缩与环境探测。"""
+    manifest = {"sources": []}
     with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as zf:
-        for item, listed in _export_log_files(directory):
+        for prefix, source in _log_sources(directory):
+            summary = {"scope": "host" if prefix else "service", "status": "ok", "files": [], "errors": []}
+            manifest["sources"].append(summary)
+            directory_fd = None
             try:
-                # lstat 后文件仍可能被换成链接/FIFO；打开时也拒绝跟随/阻塞。
-                open_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-                fd = os.open(item, open_flags)
-                with os.fdopen(fd, "rb") as source:
-                    opened = os.fstat(source.fileno())
-                    if (not stat.S_ISREG(opened.st_mode)
-                            or (opened.st_dev, opened.st_ino) != (listed.st_dev, listed.st_ino)):
+                directory_info = source.lstat()
+                if not stat.S_ISDIR(directory_info.st_mode):
+                    summary["status"] = "unsafe_directory"
+                    continue
+                list(source.iterdir())
+                # Linux 固定目录描述符，避免共享仓库中的 logs 被换成链接后越界读取。
+                if os.name == "posix" and hasattr(os, "O_DIRECTORY"):
+                    directory_fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                    opened = os.fstat(directory_fd)
+                    if (opened.st_dev, opened.st_ino) != (directory_info.st_dev, directory_info.st_ino):
+                        summary["status"] = "directory_changed"
+                        os.close(directory_fd)
                         continue
-                    # issue #108：逐行脱敏后写入，避免一次性读入整个大日志文件。
-                    with zf.open(item.name, "w") as member:
-                        _copy_redacted(source, member)
-            except OSError:
+            except OSError as exc:
+                summary["status"] = "missing" if isinstance(exc, FileNotFoundError) else "unreadable"
+                summary["errors"].append(type(exc).__name__)
+                if directory_fd is not None:
+                    os.close(directory_fd)
                 continue
+            try:
+                for item, listed in _export_log_files(source):
+                    if not _include_log(prefix, item.name):
+                        continue
+                    try:
+                        open_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+                        fd = (os.open(item.name, open_flags, dir_fd=directory_fd)
+                              if directory_fd is not None else os.open(item, open_flags))
+                        with os.fdopen(fd, "rb") as stream:
+                            opened = os.fstat(stream.fileno())
+                            if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
+                                    or (opened.st_dev, opened.st_ino) != (listed.st_dev, listed.st_ino)):
+                                summary["errors"].append({"file": item.name, "error": "identity_changed"})
+                                continue
+                            with zf.open(prefix + item.name, "w") as member:
+                                _copy_redacted(stream, member)
+                            summary["files"].append(item.name)
+                    except OSError as exc:
+                        summary["errors"].append({"file": item.name, "error": type(exc).__name__})
+            finally:
+                if directory_fd is not None:
+                    os.close(directory_fd)
+            if summary["errors"] or (prefix and "proxy.log" not in summary["files"]):
+                summary["status"] = "incomplete"
         snapshot = "\n".join(env_snapshot_lines(
             "container" if Path("/.dockerenv").exists() else "host"))
         # 环境快照同样过一遍脱敏：它可能包含config摘要里遗漏的秘密值。
         zf.writestr("export_env_snapshot.txt", redact(snapshot) + "\n")
+        zf.writestr("log_collection.json", json.dumps(manifest, ensure_ascii=False, indent=2))
 
 
 class _LogExportResponse(FileResponse):
@@ -2603,14 +2675,15 @@ async def api_update_check(request: Request):
 
 @app.get("/api/logs/export")
 async def api_logs_export():
-    """近 3 天日志 + 环境快照；下载名为 <YYYYMMDDHHMMSS>.logzip。
+    """近 3 天日志 + 环境快照；下载名为 fnmusic-logs-<时间>-<随机串>.zip。
 
     每个请求独占系统临时目录（不在日志目录内，避免日志清理影响下载）。
     压缩在线程池执行；仅在本响应发送结束后清理，不保留历史导出包，
     因此磁盘占用限于仍在压缩/发送的请求，同秒导出也不会互相覆盖。
     """
     directory = log_dir()
-    filename = f"{time.strftime('%Y%m%d%H%M%S')}.logzip"
+    proxy_status = await _proxy_diagnostics()
+    filename = f"fnmusic-logs-{time.strftime('%Y%m%d%H%M%S')}-{secrets.token_hex(4)}.zip"
     temp_dir = None
     try:
         # 不能在 worker 仍写包时取消并删除其目录；等压缩结束再移交给响应。
@@ -2619,9 +2692,14 @@ async def api_logs_export():
                 temp_dir = Path(await run_in_threadpool(tempfile.mkdtemp, prefix="fnmusic-log-export-"))
                 target = temp_dir / filename
                 await run_in_threadpool(_write_log_archive, directory, target)
+                def append_status():
+                    with zipfile.ZipFile(target, "a", zipfile.ZIP_DEFLATED) as archive:
+                        archive.writestr("proxy_diagnostics.json",
+                                         redact(json.dumps(proxy_status, ensure_ascii=False, indent=2)))
+                await run_in_threadpool(append_status)
                 response = _LogExportResponse(
                     target,
-                    media_type="application/octet-stream",
+                    media_type="application/zip",
                     headers={"Content-Disposition": f'attachment; filename="{filename}"'},
                 )
             except BaseException:
@@ -2633,6 +2711,15 @@ async def api_logs_export():
         return JSONResponse(content={"ok": False, "error": f"日志打包失败: {exc}"}, status_code=500)
     logger.info("[diag] log_export file=%s", filename)
     return response
+
+
+@app.post("/api/logs/export")
+async def api_logs_export_to_nas():
+    """NAS 保存只允许宿主网关拦截；直连 WebUI 不接受任意写入路径。"""
+    return JSONResponse(
+        content={"ok": False, "error": "保存到 NAS 需要在飞牛 App 或飞牛桌面内操作"},
+        status_code=501,
+    )
 
 
 # ------------------------------------------------------------------ 静态前端 --

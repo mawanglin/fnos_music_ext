@@ -2582,8 +2582,9 @@ def test_logs_export_pack_and_cleanup(about_env, export_temp_root):
         assert r1.status_code == 200
         disp = r1.headers.get("content-disposition", "")
         import re as _re
-        m = _re.search(r'filename="(\d{14})\.logzip"', disp)
+        m = _re.search(r'filename="(fnmusic-logs-\d{14}-[0-9a-f]{8}\.zip)"', disp)
         assert m, disp
+        assert r1.headers["content-type"].startswith("application/zip")
         zf = zipfile.ZipFile(io.BytesIO(r1.content))
         names = set(zf.namelist())
         assert "proxy.log" in names and "webui.log" in names
@@ -2592,12 +2593,13 @@ def test_logs_export_pack_and_cleanup(about_env, export_temp_root):
         assert "[env] context=" in zf.read("export_env_snapshot.txt").decode("utf-8")
         # 响应结束就删除其私有包，不把下载产物留在日志目录。
         assert not list(export_temp_root.iterdir())
-        assert not list(logs.glob("*.logzip"))
+        assert not list(logs.glob("*.zip"))
         r2 = client.get("/api/logs/export")
         assert r2.status_code == 200
-        assert _re.search(r'filename="(\d{14})\.logzip"', r2.headers["content-disposition"])
+        assert _re.search(r'filename="fnmusic-logs-\d{14}-[0-9a-f]{8}\.zip"',
+                          r2.headers["content-disposition"])
         assert not list(export_temp_root.iterdir())
-        assert not list(logs.glob("*.logzip"))
+        assert not list(logs.glob("*.zip"))
 
 
 def test_logs_export_concurrent_same_second_before_file_open(about_env, export_temp_root, monkeypatch):
@@ -2609,6 +2611,8 @@ def test_logs_export_concurrent_same_second_before_file_open(about_env, export_t
     log = about_env / "logs" / "proxy.log"
     log.write_bytes(b"first request\n")
     monkeypatch.setattr(webui.time, "strftime", lambda *args: "20261010235959")
+    random_names = iter(("aaaa1111", "bbbb2222"))
+    monkeypatch.setattr(webui.secrets, "token_hex", lambda _: next(random_names))
     original_call = webui._LogExportResponse.__call__
     paths = []
 
@@ -2636,7 +2640,8 @@ def test_logs_export_concurrent_same_second_before_file_open(about_env, export_t
                 second = await asyncio.wait_for(client.get("/api/logs/export"), 5)
                 assert second.status_code == 200
                 assert paths[0] != paths[1]
-                assert paths[0].name == paths[1].name == "20261010235959.logzip"
+                assert paths[0].name == "fnmusic-logs-20261010235959-aaaa1111.zip"
+                assert paths[1].name == "fnmusic-logs-20261010235959-bbbb2222.zip"
                 assert paths[0].exists()  # 第二个请求清理不影响第一个
                 assert not paths[1].parent.exists()
                 listing = await client.get("/api/about")
@@ -2647,12 +2652,15 @@ def test_logs_export_concurrent_same_second_before_file_open(about_env, export_t
             for response, expected in ((first_response, b"first request\n"),
                                        (second, b"second request\n")):
                 assert response.status_code == 200
-                assert response.headers["content-disposition"] == 'attachment; filename="20261010235959.logzip"'
+                assert response.headers["content-disposition"] == (
+                    f'attachment; filename="fnmusic-logs-20261010235959-'
+                    f'{"aaaa1111" if response is first_response else "bbbb2222"}.zip"'
+                )
                 with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
                     assert archive.read("proxy.log") == expected
                     assert "export_env_snapshot.txt" in archive.namelist()
             assert not list(export_temp_root.iterdir())
-            assert not list((about_env / "logs").glob("*.logzip"))
+            assert not list((about_env / "logs").glob("*.zip"))
 
     asyncio.run(exercise())
 
@@ -2710,6 +2718,7 @@ def test_logs_export_excludes_symlinks_and_listing_matches(about_env, export_tem
     if hasattr(os, "mkfifo"):
         os.mkfifo(logs / "pipe.log")
     (logs / "old.logzip").write_bytes(b"legacy archive")
+    (logs / "fnmusic-logs-20260101000000-aaaaaaaa.zip").write_bytes(b"current archive")
     old = logs / "old.log"
     old.write_text("expired")
     os.utime(old, (time.time() - 4 * 86400,) * 2)
@@ -2718,12 +2727,14 @@ def test_logs_export_excludes_symlinks_and_listing_matches(about_env, export_tem
         response = client.get("/api/logs/export")
     assert [item["name"] for item in listed] == ["proxy.log"]
     with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
-        assert set(archive.namelist()) == {"proxy.log", "export_env_snapshot.txt"}
+        assert set(archive.namelist()) == {
+            "proxy.log", "export_env_snapshot.txt", "log_collection.json", "proxy_diagnostics.json"}
         assert archive.read("proxy.log") == b"safe\n"
     assert not list(export_temp_root.iterdir())
     assert secret.read_text() == "must not export"
     # 不扫描删除历史包：它可能是旧版本仍在发送的响应。
     assert (logs / "old.logzip").exists()
+    assert (logs / "fnmusic-logs-20260101000000-aaaaaaaa.zip").exists()
 
 
 def test_logs_export_rejects_symlink_swapped_after_listing(about_env, export_temp_root, monkeypatch):
@@ -2737,7 +2748,7 @@ def test_logs_export_rejects_symlink_swapped_after_listing(about_env, export_tem
     original_open = webui.os.open
 
     def swap_then_open(path, flags, *args, **kwargs):
-        if Path(path) == log:
+        if Path(path) == log or (Path(path) == Path(log.name) and kwargs.get("dir_fd") is not None):
             log.unlink()
             log.symlink_to(secret)
         return original_open(path, flags, *args, **kwargs)
@@ -2747,7 +2758,8 @@ def test_logs_export_rejects_symlink_swapped_after_listing(about_env, export_tem
         response = client.get("/api/logs/export")
     assert response.status_code == 200
     with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
-        assert archive.namelist() == ["export_env_snapshot.txt"]
+        assert set(archive.namelist()) == {
+            "export_env_snapshot.txt", "log_collection.json", "proxy_diagnostics.json"}
     assert not list(export_temp_root.iterdir())
 
 
@@ -2812,6 +2824,135 @@ def test_logs_export_requires_admin(about_env):
     with TestClient(webui.app) as client:
         r = client.get("/api/logs/export")
     assert r.status_code == 403
+
+
+def test_logs_export_includes_separate_host_logs_and_takeover_diagnostics(about_env, monkeypatch):
+    import io
+    import zipfile
+
+    host = about_env / "logs"
+    (host / "proxy.log").write_text("host-proxy token=fixture-host-secret\n", encoding="utf-8")
+    (host / "proxy.log.2026-11-08.00000001").write_bytes(b"rotated-host\n")
+    (host / "install.log").write_text("install-line\n", encoding="utf-8")
+    (host / "env_snapshot.txt").write_text("[env] context=host\n", encoding="utf-8")
+    (host / "unrelated.txt").write_text("must-not-export\n", encoding="utf-8")
+    service = about_env / "sources-data" / "logs"
+    service.mkdir(parents=True)
+    (service / "proxy.log").write_bytes(b"separate-service-log\n")
+    (service / "musicdl.log").write_text("source-line\n", encoding="utf-8")
+    monkeypatch.setenv("FNMUSIC_LOG_DIR", str(service))
+
+    async def maintenance(method, path, body=None, *, timeout):
+        assert method == "GET" and path == "/api/diagnostics/status"
+        assert timeout <= 3
+        return {"ok": True, "takeover": {"status": "mismatch"}, "upstream": {"status": "ok"}}
+
+    monkeypatch.setattr(webui, "_try_maintenance_socket", maintenance)
+    with authed_client() as client:
+        names = {item["name"] for item in client.get("/api/about").json()["logs"]}
+        response = client.get("/api/logs/export")
+    assert {"proxy.log", "host/proxy.log", "host/env_snapshot.txt"} <= names
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        assert archive.read("proxy.log") == b"separate-service-log\n"
+        assert b"fixture-host-secret" not in archive.read("host/proxy.log")
+        assert archive.read("host/proxy.log.2026-11-08.00000001") == b"rotated-host\n"
+        assert "host/unrelated.txt" not in archive.namelist()
+        manifest = json.loads(archive.read("log_collection.json"))
+        assert manifest["sources"][1]["status"] == "ok"
+        report = json.loads(archive.read("proxy_diagnostics.json"))
+        assert report["status"] == "reachable" and report["takeover"]["status"] == "mismatch"
+
+
+@pytest.mark.parametrize("host_state", ["missing", "unreadable", "unsafe_directory"])
+def test_logs_export_reports_host_log_collection_failure(about_env, monkeypatch, host_state):
+    import io
+    import zipfile
+
+    service = about_env / "service-logs"
+    service.mkdir()
+    monkeypatch.setenv("FNMUSIC_LOG_DIR", str(service))
+    host = about_env / "logs"
+    if host_state == "missing":
+        host.rmdir()
+    elif host_state == "unreadable":
+        original = Path.iterdir
+
+        def inaccessible(path):
+            if path == host:
+                raise PermissionError("fixture")
+            return original(path)
+        monkeypatch.setattr(Path, "iterdir", inaccessible)
+    else:
+        host.rmdir()
+        host.symlink_to(service, target_is_directory=True)
+    monkeypatch.setattr(webui, "MAINTENANCE_SOCKET", str(about_env / "absent.sock"))
+    with authed_client() as client:
+        response = client.get("/api/logs/export")
+    assert response.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        manifest = json.loads(archive.read("log_collection.json"))
+        assert manifest["sources"][1]["status"] == host_state
+        assert json.loads(archive.read("proxy_diagnostics.json"))["status"] == "unavailable"
+
+
+def test_logs_export_excludes_hardlinks_and_duplicate_metadata(about_env):
+    import io
+    import os
+    import zipfile
+
+    logs = about_env / "logs"
+    secret = about_env / "secret"
+    secret.write_text("must-not-export", encoding="utf-8")
+    os.link(secret, logs / "proxy.log")
+    for name in ("log_collection.json", "proxy_diagnostics.json", "export_env_snapshot.txt"):
+        (logs / name).write_text("stale-metadata", encoding="utf-8")
+    with authed_client() as client:
+        response = client.get("/api/logs/export")
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        assert "proxy.log" not in archive.namelist()
+        assert len(archive.namelist()) == len(set(archive.namelist()))
+        assert all(b"stale-metadata" not in archive.read(name) for name in archive.namelist())
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Linux directory descriptors")
+def test_logs_export_pins_host_directory_before_a_symlink_swap(about_env, monkeypatch):
+    import io
+    import zipfile
+
+    host = about_env / "logs"
+    (host / "proxy.log").write_bytes(b"safe-host-log\n")
+    secret = about_env / "other-data"
+    secret.mkdir()
+    (secret / "proxy.log").write_bytes(b"must-not-export\n")
+    service = about_env / "service-logs"
+    service.mkdir()
+    monkeypatch.setenv("FNMUSIC_LOG_DIR", str(service))
+    original = webui._export_log_files
+    swapped = False
+
+    def swap_after_listing(directory):
+        nonlocal swapped
+        for item, info in original(directory):
+            if directory == host and not swapped:
+                host.rename(about_env / "original-logs")
+                host.symlink_to(secret, target_is_directory=True)
+                swapped = True
+            yield item, info
+
+    monkeypatch.setattr(webui, "_export_log_files", swap_after_listing)
+    with authed_client() as client:
+        response = client.get("/api/logs/export")
+    assert response.status_code == 200 and swapped
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        assert archive.read("host/proxy.log") == b"safe-host-log\n"
+        assert all(b"must-not-export" not in archive.read(name) for name in archive.namelist())
+
+
+def test_logs_export_post_is_gateway_only(about_env):
+    with authed_client() as client:
+        response = client.post("/api/logs/export", json={"directory": "/vol1/music"})
+    assert response.status_code == 501
+    assert response.json()["error"] == "保存到 NAS 需要在飞牛 App 或飞牛桌面内操作"
 
 
 def test_config_put_logs_cfg_lines(env_file, svctl, caplog):
